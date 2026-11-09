@@ -98,14 +98,14 @@ class LogisticModel:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(json.dumps({
             "features": FEATURES, "intercept": self.intercept, "weights": self.weights,
-            "means": self.means, "stds": self.stds, "meta": self.meta}, indent=2))
+            "means": self.means, "stds": self.stds, "meta": self.meta}, indent=2), encoding="utf-8")
 
     @classmethod
     def load(cls, path: str | Path) -> "LogisticModel":
         p = Path(path)
         if not p.exists():
             return cls.prior_only()
-        d = json.loads(p.read_text())
+        d = json.loads(p.read_text(encoding="utf-8-sig"))
         m = cls()
         m.intercept = float(d.get("intercept", 0.0))
         m.weights.update(d.get("weights", {}))

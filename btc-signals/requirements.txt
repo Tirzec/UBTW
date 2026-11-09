@@ -8,3 +8,4 @@ python-dotenv>=1.0
 pytest>=8
 pytest-asyncio>=0.23
 pynacl>=1.5
+cryptography>=42      # --https certificate (no openssl command needed, works on Windows)

@@ -427,5 +427,5 @@ def test_secrets_are_redacted_from_logs(monkeypatch, caplog):
 
 def test_env_files_are_gitignored():
     from pathlib import Path
-    gi = (Path(__file__).resolve().parent.parent / ".gitignore").read_text()
+    gi = (Path(__file__).resolve().parent.parent / ".gitignore").read_text(encoding="utf-8")
     assert ".env" in gi.splitlines() and "*.pem" in gi

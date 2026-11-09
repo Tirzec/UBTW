@@ -117,5 +117,5 @@ def test_report_written(tmp_path):
     res = simulate([w], bars, {"5m": LogisticModel.prior_only()})
     s = summarize(res, "test")
     p = write_report(s, res, tmp_path, DEFAULTS)
-    assert p.exists() and "<svg" in p.read_text()
+    assert p.exists() and "<svg" in p.read_text(encoding="utf-8")
     assert s["trades_rule"]["n"] == 1 and math.isfinite(s["model_brier"])

@@ -128,24 +128,36 @@ def create_app(cfg: dict | None = None, start_engine: bool = True) -> FastAPI:
 
 
 def ensure_self_signed_cert(cert: Path, key: Path) -> None:
-    """Create a localhost certificate with the openssl CLI (built into macOS) if missing."""
-    import shutil
-    import subprocess
-
+    """Create a localhost certificate if missing. Pure Python (the `cryptography` package), so it
+    works the same on Windows, macOS and Linux; no openssl command needed."""
     if cert.exists() and key.exists():
         return
-    if not shutil.which("openssl"):
-        raise SystemExit("--https needs the `openssl` command (built into macOS; "
-                         "on Linux: apt install openssl)")
+    import datetime
+    import ipaddress
+
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        raise SystemExit('--https needs the cryptography package: pip install "cryptography>=42"')
     cert.parent.mkdir(parents=True, exist_ok=True)
-    base = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256",
-            "-days", "825", "-keyout", str(key), "-out", str(cert), "-subj", "/CN=localhost"]
-    san = ["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"]
-    r = subprocess.run(base + san, capture_output=True, text=True)
-    if r.returncode != 0:          # very old openssl without -addext
-        r = subprocess.run(base, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise SystemExit(f"could not create certificate: {r.stderr.strip()}")
+    pk = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    crt = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(pk.public_key())
+           .serial_number(x509.random_serial_number())
+           .not_valid_before(now - datetime.timedelta(minutes=5))
+           .not_valid_after(now + datetime.timedelta(days=825))
+           .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost"),
+                                                       x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                          critical=False)
+           .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+           .sign(pk, hashes.SHA256()))
+    key.write_bytes(pk.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                                     serialization.NoEncryption()))
+    cert.write_bytes(crt.public_bytes(serialization.Encoding.PEM))
     log.info("created self-signed certificate %s", cert)
 
 
@@ -161,7 +173,13 @@ def main(argv: list[str] | None = None) -> None:
                     help="serve the dashboard over https with a self-signed certificate "
                          "(use when your browser forces https even for localhost)")
     ap.add_argument("--port", type=int, help="override server.port")
+    ap.add_argument("--no-keep-awake", action="store_true",
+                    help="allow the computer to idle-sleep while the bot runs")
+    ap.add_argument("--no-browser", action="store_true", help="don't open the dashboard in a browser")
     args = ap.parse_args(argv)
+
+    from .console import safe_console
+    safe_console()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
@@ -191,8 +209,37 @@ def main(argv: list[str] | None = None) -> None:
     print(f"\n  Dashboard: {scheme}://{shown}:{port}\n", flush=True)
     if use_https:
         print("  (self-signed certificate: your browser will warn once - choose "
-              "'Show Details' / 'Advanced' and continue to localhost)\n", flush=True)
-    uvicorn.run(create_app(cfg), host=host, port=port, log_level="warning", **ssl)
+              "'Advanced' and continue to localhost)\n", flush=True)
+    # informational only: the clock check never blocks or changes trading
+    try:
+        from .clock import check_clock
+        cr = check_clock(ntp_timeout=1.5)
+        print(f"  Clock: [{cr.status}] {cr.detail}" + ("" if cr.status == "PASS" else
+              "  -> run `python -m app.clock` for how to fix it"), flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  Clock: could not check ({e})", flush=True)
+    from . import keepawake
+    if not args.no_keep_awake and sc.get("keep_awake", True):
+        print(f"  Keep awake: {keepawake.enable()}", flush=True)
+    url = f"{scheme}://{shown}:{port}"
+    if not args.no_browser and sc.get("open_browser", False):
+        import threading
+        import webbrowser
+        threading.Timer(2.0, lambda: webbrowser.open(url)).start()
+    print("  Stop: press Ctrl+C here (or run `python -m app.trader stop` for the kill switch)\n", flush=True)
+    import os
+    pid_file = resolve_path(cfg, "data/bot.pid")
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")      # used by windows\stop-bot.ps1
+    try:
+        uvicorn.run(create_app(cfg), host=host, port=port, log_level="warning", **ssl)
+    finally:
+        keepawake.disable()
+        try:
+            if pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                pid_file.unlink()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

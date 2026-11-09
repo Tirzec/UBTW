@@ -68,7 +68,7 @@ def summarize(closing: list[dict], trades: list[dict]) -> dict:
 
 def write_html(summary: dict, out: Path) -> Path:
     out.mkdir(parents=True, exist_ok=True)
-    (out / "sports_summary.json").write_text(json.dumps(summary, indent=2, default=float))
+    (out / "sports_summary.json").write_text(json.dumps(summary, indent=2, default=float), encoding="utf-8")
 
     def cents(x) -> str:
         return "" if x is None else "{:+.1f}¢".format(x * 100)
@@ -98,5 +98,5 @@ positive CLV rate: {'' if summary['positive_clv_rate'] is None else '{:.0%}'.for
 <div style="display:flex;gap:32px"><div><h3>Sportsbook consensus at close</h3>{cal(summary['calibration_consensus'])}</div>
 <div><h3>Polymarket price at close</h3>{cal(summary['calibration_polymarket_close'])}</div></div>"""
     p = out / "sports_report.html"
-    p.write_text(page)
+    p.write_text(page, encoding="utf-8")
     return p

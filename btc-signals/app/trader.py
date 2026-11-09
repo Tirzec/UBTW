@@ -1,6 +1,7 @@
 """Auto-trader command line.
 
   python -m app.trader stop      # KILL SWITCH: cancel all open orders, halt trading
+  python -m app.trader stop --wait   # ... and wait (up to 15 s) until the running bot confirms
   python -m app.trader resume    # clear a stop / pause
   python -m app.trader status    # mode, risk state, open positions
   python -m app.trader stats     # paper + live results
@@ -59,16 +60,42 @@ async def _direct_cancel_all(cfg: dict | None = None) -> str:
         await client.close()
 
 
+def _wait_for_kill(c, t0: float, timeout: float = 15.0) -> str:
+    """Wait for the running bot's 'kill' events (one per strategy module) after t0."""
+    deadline = time.time() + timeout
+    seen: list = []
+    while time.time() < deadline:
+        seen = [dict(r) for r in c.execute("SELECT module, message, data FROM bot_events "
+                                          "WHERE kind='kill' AND ts >= ?", (t0 - 0.5,))]
+        if seen and time.time() > t0 + 3:          # give every module a chance to report
+            break
+        time.sleep(0.5)
+    if not seen:
+        return ("No confirmation from a running bot (is it running?). The stop stays set: the bot "
+                "halts as soon as it starts.")
+    out = []
+    for r in seen:
+        n = (json.loads(r["data"] or "{}") or {}).get("canceled", "?")
+        out.append(f"  confirmed: {r['module'] or 'crypto_updown'} halted, {n} open orders canceled")
+    return "\n".join(out)
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.trader")
     ap.add_argument("command", choices=["stop", "resume", "status", "stats"])
     ap.add_argument("--reason", default="STOP from command line")
+    ap.add_argument("--wait", action="store_true", help="stop: wait until the running bot confirms the halt")
     a = ap.parse_args(argv)
+    from .console import safe_console
+    safe_console()
     cfg = load_config()
     c = _db(cfg)
     if a.command == "stop":
-        _set(c, "kill_requested", {"ts": time.time(), "reason": a.reason})
+        t0 = time.time()
+        _set(c, "kill_requested", {"ts": t0, "reason": a.reason})
         print("Kill switch set: the running bot cancels all orders and halts within ~1 second.")
+        if a.wait:
+            print(_wait_for_kill(c, t0))
         if (cfg.get("trading", {}) or {}).get("mode") == "live":
             print(asyncio.run(_direct_cancel_all(cfg)))
         print("Open positions are NOT sold automatically; manage them in the Polymarket app.")

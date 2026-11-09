@@ -26,11 +26,11 @@ def load_config(path: str | os.PathLike | None = None) -> dict[str, Any]:
     try:
         from dotenv import load_dotenv
 
-        load_dotenv(ROOT / ".env")
+        load_dotenv(ROOT / ".env", encoding="utf-8-sig")   # Notepad may add a BOM
     except ImportError:  # python-dotenv is optional
         pass
     path = Path(path or os.environ.get("BTC_SIGNALS_CONFIG", ROOT / "config.yaml"))
-    with open(path) as f:
+    with open(path, encoding="utf-8-sig") as f:      # -sig: tolerate a Notepad BOM
         cfg = yaml.safe_load(f) or {}
     cfg["_root"] = str(ROOT)
     cfg["secrets"] = {

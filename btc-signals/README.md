@@ -31,31 +31,43 @@ Any market that differs (other lookback, other source, other comparator, TWAP di
 
 ## Setup
 
-Requires Python 3.9+ (the version built into macOS works).
+Runs on **Windows, macOS and Linux** with Python 3.9+.
+**Windows: follow [docs/WINDOWS.md](docs/WINDOWS.md)** (PowerShell setup, background running,
+safe stop, clock sync, power settings). In short:
+
+```powershell
+cd btc-signals
+.\windows\setup.bat          # venv + dependencies + .env + tests + clock check
+.\windows\start-bot.bat      # runs in the background, opens http://localhost:8000
+.\windows\stop-bot.bat       # kill switch (cancel all orders, halt), then stop the process
+```
+
+macOS / Linux:
 
 ```bash
 cd btc-signals
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # optional: Polymarket API keys for the PolyBolt feed
-python -m pytest                # 133 tests, about 2 s
-python -m app.main              # open http://127.0.0.1:8000
+python -m pytest                # about 2 s
+python -m app.main              # opens http://localhost:8000
+python -m app.clock             # is the computer's clock right? (the 5-minute windows need it)
 ```
+
+The app keeps the computer from idle-sleeping while it runs (`server.keep_awake`, or
+`--no-keep-awake`); no `caffeinate` needed.
 
 Click **Enable alerts** once in the browser to allow sound and desktop notifications.
 
 **"This site can't provide a secure connection" / "can't establish a secure connection"?**
 Something on your computer (a school or work security profile, a VPN, or a browser setting) is
-forcing https even for localhost. Start the bot with `--https` instead:
-
-```bash
-caffeinate -dis python -m app.main --https      # macOS; plain `python -m app.main --https` elsewhere
-```
+forcing https even for localhost. Start the bot with `--https` instead
+(`python -m app.main --https`, or `.\windows\start-bot.ps1 -Https`).
 
 Then open **https://localhost:8000**. The first time, the browser warns that the certificate isn't
 trusted. It's a certificate the app just made for your own computer, so it's safe to continue:
+- **Chrome / Edge:** Advanced → Continue to localhost
 - **Safari:** Show Details → visit this website
-- **Chrome:** Advanced → Proceed to localhost
 
 Set `server.https: true` in `config.yaml` to make this the default.
 
@@ -258,7 +270,7 @@ LIVE refuses to start unless **all** of these hold:
 1. `trading.mode: live` **and** `trading.live_trading_enabled: true` in config.yaml
 2. At least **300 closed paper trades**. Your paper stats are printed for you to review.
 3. **Python 3.11+** with `pip install "polymarket-client>=0.12.0"`, the official SDK, which needs 3.11.
-   macOS's built-in Python 3.9 can only run paper mode; install Python 3.12 from python.org for live.
+   Python 3.9/3.10 can only run paper mode on polymarket.com; install Python 3.12 from python.org for live.
 4. `POLYMARKET_PRIVATE_KEY` and `POLYMARKET_WALLET_ADDRESS` in `.env`
 5. **Polymarket's geoblock check passes.** The **United States is blocked** (close-only) on
    polymarket.com and its API. From the US, LIVE mode will refuse to start. Do not use a VPN to
@@ -523,14 +535,18 @@ app/main.py      FastAPI + websocket web/           dashboard (plain HTML/JS)
 app/notify.py    phone push alerts (ntfy / Telegram)
 app/trading/     auto-trader: rules, risk, paper/live brokers, audit store, live gate
 app/trader.py    kill switch / status CLI
+app/clock.py     clock check (NTP, falls back to the exchange's HTTPS clock; w32tm status on Windows)
+app/keepawake.py stop idle sleep while running (Windows / macOS / Linux)
+windows/         setup / start-bot / stop-bot / resume / status (.bat wrappers around .ps1)
 app/modules/      strategy modules: base interface, crypto_updown, sports (markets, odds, research, module)
 backtest/sports_report.py  sports CLV/ROI/calibration from recorded data
 app/ingest/us_markets.py  Polymarket US discovery, rules check, order books
 app/trading/us_broker.py  Polymarket US live orders (Ed25519-signed REST)
 backtest/        collect / replay / train / report
-tests/           133 tests: sports (de-vig, consensus, quotas, exits, CLV), features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
+tests/           tests: sports (de-vig, consensus, quotas, exits, CLV), features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
                  parsers and staleness, degraded-data end-to-end, books, model, backtester
 docs/ARCHITECTURE.md   research notes and design
+docs/WINDOWS.md        Windows setup and running guide
 ```
 
 ## Known limitations

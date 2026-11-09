@@ -72,7 +72,7 @@ def setup_trade_log(path: Path) -> None:
     if any(getattr(h, "_trade_log", False) for h in log.handlers):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    h = RotatingFileHandler(path, maxBytes=10_000_000, backupCount=5)
+    h = RotatingFileHandler(path, maxBytes=10_000_000, backupCount=5, encoding="utf-8")
     h._trade_log = True  # type: ignore[attr-defined]
     h.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s"))
     h.addFilter(RedactSecrets())

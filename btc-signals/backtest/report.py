@@ -92,8 +92,8 @@ def _table(d: dict) -> str:
 def write_report(summary: dict, res: BTResult, out_dir: str | Path, cfg: dict) -> Path:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "summary.json").write_text(json.dumps(summary, indent=2, default=float))
-    (out / "trades.json").write_text(json.dumps(res.trades, indent=1, default=float))
+    (out / "summary.json").write_text(json.dumps(summary, indent=2, default=float), encoding="utf-8")
+    (out / "trades.json").write_text(json.dumps(res.trades, indent=1, default=float), encoding="utf-8")
     trades = sorted(res.trades, key=lambda t: t["opened_ts"])
     mb = summary.get("model_brier")
     kb = summary.get("market_brier")
@@ -119,5 +119,5 @@ Log-loss: model {summary.get('model_logloss') or float('nan'):.4f} vs market {su
 <h2>Exit reasons</h2><table>{''.join(f'<tr><th>{html.escape(k)}</th><td>{v}</td></tr>' for k, v in summary['exit_reasons'].items()) or '<tr><td>no trades</td></tr>'}</table>
 <p>Raw data: <code>summary.json</code>, <code>trades.json</code>.</p></body></html>"""
     p = out / "report.html"
-    p.write_text(page)
+    p.write_text(page, encoding="utf-8")
     return p

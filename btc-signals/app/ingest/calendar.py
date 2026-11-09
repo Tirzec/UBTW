@@ -44,7 +44,7 @@ def parse_ff(items: list[dict], countries: list[str], impacts: list[str]) -> lis
 def load_local(path: Path) -> list[EconEvent]:
     if not path.exists():
         return []
-    data = yaml.safe_load(path.read_text()) or {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
     out = []
     for e in data.get("events", []) or []:
         try:

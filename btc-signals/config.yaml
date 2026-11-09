@@ -4,6 +4,8 @@ server:
   host: 127.0.0.1
   port: 8000
   https: false        # true (or run with --https) if your browser forces https even for localhost
+  keep_awake: true    # stop the computer idle-sleeping while the bot runs (Windows/macOS/Linux)
+  open_browser: true  # open the dashboard in the default browser on start (--no-browser to skip)
 
 db_path: data/signals.db
 

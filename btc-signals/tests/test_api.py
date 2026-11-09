@@ -20,3 +20,16 @@ def test_positions_api_and_state(tmp_path):
                                               "entry_price": 0.5, "shares": 1}).status_code == 422
         assert c.post(f"/api/positions/{pid}/close").json() == {"ok": True}
         assert c.get("/api/state").json()["positions"] == []
+
+
+def test_self_signed_cert_without_openssl(tmp_path, monkeypatch):
+    """--https must not depend on the openssl command (absent on Windows)."""
+    import ssl
+    import shutil
+
+    from app.main import ensure_self_signed_cert
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    cert, key = tmp_path / "c.pem", tmp_path / "k.pem"
+    ensure_self_signed_cert(cert, key)
+    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ctx.load_cert_chain(str(cert), str(key))          # loads = valid pair
