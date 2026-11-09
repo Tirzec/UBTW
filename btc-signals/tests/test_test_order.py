@@ -65,6 +65,11 @@ class FakeExchange:
                 self.balance += (-1 if buy else 1) * fq * fill_px - fee
             self.orders[oid] = o
             return httpx.Response(200, json={"id": oid})
+        if p == "/v1/orders/open/cancel":
+            ids = [o["id"] for o in self.orders.values() if o["state"] == "ORDER_STATE_NEW"]
+            for i in ids:
+                self.orders[i]["state"] = "ORDER_STATE_CANCELED"
+            return httpx.Response(200, json={"canceledOrderIds": ids})
         if p.startswith("/v1/order/") and p.endswith("/cancel"):
             o = self.orders[p.split("/")[3]]
             if o["state"] == "ORDER_STATE_NEW":
@@ -223,3 +228,18 @@ def test_part2_rereads_price_after_confirmation(tmp_path, monkeypatch):
         _run(ex, monkeypatch, fill=True, qty=1, confirm=lambda _: "y", input_fn=typed, db=str(tmp_path / "d.db"))
     assert all(o["intent"] != "ORDER_INTENT_BUY_LONG" or o["tif"] != "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
                for o in ex.orders.values())                        # no real buy was sent
+
+
+def test_kill_switch_live_test(tmp_path, monkeypatch):
+    ex = FakeExchange()
+    broker, gw = _setup(ex, monkeypatch)
+
+    async def direct(cfg):                    # the kill switch's exchange-side cancel, via the fake
+        return f"Polymarket US: canceled {await broker.cancel_all()} open orders"
+    monkeypatch.setattr("app.trader._direct_cancel_all", direct)
+    cfg = {"trading": {"risk": {"max_stake_usd": 1}}, "db_path": str(tmp_path / "d.db")}
+    rep = asyncio.run(T.run(cfg, broker=broker, gw=gw, prefer="15m", fill=False, qty=None,
+                            confirm=lambda _: "y", kill=True))
+    assert rep.ok, rep.lines
+    assert [st for st, _ in rep.lines].count("PASS") >= 4
+    assert all(o["state"] == "ORDER_STATE_CANCELED" for o in ex.orders.values())

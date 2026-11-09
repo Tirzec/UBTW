@@ -140,8 +140,21 @@ Known limitations on Polymarket US:
    minimum-size maker BUY at 1c, confirmed open, canceled, cancel confirmed (costs nothing). With
    `--fill` (and a typed phrase) it then buys the minimum at the ask and sells it straight back,
    reporting actual fees and slippage vs predicted. `--qty 1` gives a fee big enough to measure.
+   `--kill-test` places a 1c order and fires the kill switch's cancel-all, confirming it's gone.
+   `python -m app.trader fills` shows your real fills from the exchange's trade records.
 6. Let **paper mode run for 300+ trades on Polymarket US** (`python -m app.trader stats`).
    Paper trades on the other exchange don't count.
+**Live safety (always on in LIVE mode):**
+- **Phase 1 hard caps** (in code, `app/trading/live_phase.py`; config can only lower them): stake <= $1,
+  daily loss <= $10 across modules, <= 10 live trades per day.
+- **Reconciliation every 60 s**: positions (`/v1/portfolio/positions`) and open orders vs. the bot's
+  records. A mismatch on two checks in a row halts everything (orders canceled, alert sent). At startup
+  positions are loaded from the exchange first; any mismatch halts before the first order.
+- **No duplicate orders**: the exchange has no client order ID, so after a timeout or dropped connection
+  the bot looks for the order (open orders, then your trade history) instead of re-sending it.
+  Partial fills keep the filled part; immediate orders never rest; 429 rate limits pause briefly.
+- `python -m app.trader reconcile` runs the comparison by hand (read-only).
+
 7. In `config.yaml` set `trading.mode: live` and `trading.live_trading_enabled: true`, then start
    the app. It checks that your key works (shows your buying power), prints your paper stats and
    risk limits, and asks you to type `I UNDERSTAND THIS TRADES REAL MONEY`.

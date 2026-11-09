@@ -104,6 +104,12 @@ class Engine:
         if tc.get("mode") == "live" and mode != "live":
             log.warning("trading.mode is live but the live checks were not passed - running PAPER")
         self.trade_mode = mode
+        self.reconciler = None
+        self.live_phase = None
+        if mode == "live":
+            from .trading.live_phase import apply_phase1
+            self.live_phase = apply_phase1(cfg)          # hard phase-1 caps, before any trader exists
+            log.warning("LIVE phase 1 limits in force: %s", self.live_phase)
         if self.trading_enabled:
             from .trading.store import TradeStore, setup_trade_log
             setup_trade_log(resolve_path(cfg, tc.get("log_file", "data/trader.log")))
@@ -149,7 +155,24 @@ class Engine:
             broker = PaperBroker(self.clob.store.get, self.clob.store.trades_since, self.fee_schedule_for,
                                  ioc_non_post_only=self.venue == "polymarket_us")
         from .trading.risk import GlobalRisk
-        self.global_risk = GlobalRisk(self.cfg.get("risk_global", {}))
+        trades_today = None
+        if self.trade_mode == "live":
+            from .trading.live_phase import live_entries_today
+            trades_today = lambda: live_entries_today(self.db, venue=self.venue)  # noqa: E731
+        self.global_risk = GlobalRisk(self.cfg.get("risk_global", {}), trades_today_fn=trades_today)
+        if self.trade_mode == "live" and self.venue == "polymarket_us":
+            # load positions from the exchange FIRST; any mismatch halts before the first order
+            from .trading.reconcile import Reconciler
+            self.reconciler = Reconciler(self, broker, self.db,
+                                         interval_s=float(self.cfg.get("trading", {}).get("reconcile_interval_s", 60)),
+                                         venue=self.venue, bot_orders_fn=self._bot_open_orders)
+            try:
+                r = await self.reconciler.startup()
+                log.warning("startup reconciliation: %s", "OK" if r.ok else "; ".join(r.mismatches))
+            except Exception as e:  # noqa: BLE001 - can't verify the account: don't trade
+                reason = f"RECONCILE: could not read positions from the exchange at startup ({e})"
+                self.trade_store.set_state("kill_requested", {"ts": time.time(), "reason": reason})
+                self.alert("risk", "Startup check failed - trading HALTED", reason, "warn")
         crypto_on = (self.cfg.get("modules", {}) or {}).get("crypto_updown", {}).get("enabled", True)
         self.traders = {}
         if crypto_on:
@@ -157,6 +180,18 @@ class Engine:
             self.traders["crypto_updown"] = self.trader
             await self.trader.start()
         await self._start_sports()
+        if self.reconciler is not None:
+            self._tasks.append(asyncio.create_task(self._guard("reconcile", self.reconciler.run()),
+                                                   name="reconcile"))
+
+    def _bot_open_orders(self) -> dict:
+        """{order id: market slug} of every order any trader currently holds open."""
+        out = {}
+        for t in getattr(self, "traders", {}).values():
+            for oid, o in t.broker.orders.items():
+                if not o.done:
+                    out[oid] = o.token.rsplit(":", 1)[0]
+        return out
 
     async def _start_sports(self) -> None:
         """Sports module: Polymarket US only. Live only after its own 200-paper-trade gate."""
@@ -616,4 +651,8 @@ class Engine:
             "bot": self.trader.snapshot(now) if self.trader else {"mode": "off"},
             "modules": self._modules_snapshot(now),
             "venue": self.venue,
+            "live": {"phase": self.live_phase,
+                     "reconcile": self.reconciler.snapshot() if self.reconciler else None,
+                     "trades_today": (self.global_risk.trades_today_fn() if self.global_risk is not None
+                                      and self.global_risk.trades_today_fn else None)},
         }

@@ -140,6 +140,9 @@ def _check_us(cfg, tc, n, need, stats, problems, interactive, input_fn, account_
         import nacl  # noqa: F401
     except ImportError:
         problems.append("PyNaCl missing: pip install -r requirements.txt")
+    from .live_phase import phase_of
+    if phase_of(cfg) != 1:
+        problems.append(f"trading.live_phase is {phase_of(cfg)}; only phase 1 exists (set live_phase: 1)")
     if not key_id:
         problems.append("POLYMARKET_KEY_ID not set in .env (create a key at polymarket.us/developer)")
     if not secret:
@@ -156,7 +159,11 @@ def _check_us(cfg, tc, n, need, stats, problems, interactive, input_fn, account_
         raise SystemExit("\nLIVE mode refused:\n  - " + "\n  - ".join(problems) +
                          "\n\nKeep running in paper mode (trading.mode: paper).")
     rc = tc.get("risk", {}) or {}
+    from .live_phase import PHASE1_MAX_DAILY_LOSS_USD, PHASE1_MAX_STAKE_USD, PHASE1_MAX_TRADES_PER_DAY
     print(f"\nAccount: {account}")
+    print(f"LIVE PHASE 1 hard limits (config can only lower them): stake <= ${PHASE1_MAX_STAKE_USD:g}, "
+          f"daily loss <= ${PHASE1_MAX_DAILY_LOSS_USD:g}, <= {PHASE1_MAX_TRADES_PER_DAY} live trades/day. "
+          "Positions are reconciled with the exchange every 60 s; any mismatch halts trading.")
     print(f"Risk limits: max stake ${rc.get('max_stake_usd', 5)}, daily loss limit "
           f"${rc.get('daily_loss_limit_usd', 25)}, max {rc.get('max_consecutive_losses', 5)} losses in a "
           f"row, max exposure ${rc.get('max_total_exposure_usd', 15)}")

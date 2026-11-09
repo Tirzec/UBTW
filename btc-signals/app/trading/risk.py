@@ -140,10 +140,12 @@ class RiskManager:
 class GlobalRisk:
     """Limits across ALL modules: combined daily loss and total open exposure."""
 
-    def __init__(self, conf: dict | None = None):
+    def __init__(self, conf: dict | None = None, trades_today_fn=None):
         conf = conf or {}
         self.daily_loss_limit = float(conf.get("daily_loss_limit_usd", 40))
         self.max_exposure = float(conf.get("max_total_exposure_usd", 60))
+        self.max_trades_per_day = conf.get("max_trades_per_day")      # set by the live phase
+        self.trades_today_fn = trades_today_fn
         self.traders: list = []
 
     def register(self, trader) -> None:
@@ -167,6 +169,10 @@ class GlobalRisk:
         exp = self.exposure()
         if exp + stake > self.max_exposure + 1e-9:
             out.append(f"total exposure ${exp:.2f} + ${stake:.2f} > global max ${self.max_exposure:g}")
+        if self.max_trades_per_day is not None and self.trades_today_fn is not None:
+            n = self.trades_today_fn()
+            if n >= int(self.max_trades_per_day):
+                out.append(f"live phase 1: {n} trades today, daily cap is {int(self.max_trades_per_day)}")
         return out
 
     def summary(self, now: float) -> dict:

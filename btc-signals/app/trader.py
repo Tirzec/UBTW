@@ -5,6 +5,8 @@
   python -m app.trader resume    # clear a stop / pause
   python -m app.trader status    # mode, risk state, open positions
   python -m app.trader stats     # paper + live results
+  python -m app.trader fills     # your latest real fills on Polymarket US (price, size, taker/maker)
+  python -m app.trader reconcile # compare the bot's records with the exchange now (read-only)
 """
 from __future__ import annotations
 
@@ -80,9 +82,38 @@ def _wait_for_kill(c, t0: float, timeout: float = 15.0) -> str:
     return "\n".join(out)
 
 
+async def _account_report(cfg: dict, what: str, c) -> str:
+    """Read-only views of the real account (signed GET requests only)."""
+    kid, sec = os.environ.get("POLYMARKET_KEY_ID"), os.environ.get("POLYMARKET_SECRET_KEY")
+    if not (kid and sec):
+        return "POLYMARKET_KEY_ID / POLYMARKET_SECRET_KEY not set in .env"
+    from .trading.us_broker import UsLiveBroker
+    b = UsLiveBroker(kid, sec, lambda t: {})
+    try:
+        if what == "fills":
+            trades = await b.recent_trades()
+            if not trades:
+                return "no fills found"
+            lines = [f"{'time (local)':19s}  {'market':42s} {'price':>7s} {'qty':>8s}  role"]
+            for t in trades[:25]:
+                lines.append(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t['ts']))}  {t['slug'][:42]:42s} "
+                             f"{t['price']:7.4f} {t['qty']:8.2f}  {'taker' if t['aggressor'] else 'maker'}")
+            lines.append("price = the Yes/Up price the trade executed at (exchange trade record)")
+            return "\n".join(lines)
+        from .db import DB
+        from .trading.reconcile import Reconciler
+        r = await Reconciler(None, b, DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db")))).check(orders=False)
+        out = [f"exchange positions: {r.exchange_positions or 'none'}",
+               f"bot's live positions: {r.bot_positions or 'none'}"]
+        out.append("MATCH" if r.ok else "MISMATCH:\n  - " + "\n  - ".join(r.mismatches))
+        return "\n".join(out)
+    finally:
+        await b.close()
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.trader")
-    ap.add_argument("command", choices=["stop", "resume", "status", "stats"])
+    ap.add_argument("command", choices=["stop", "resume", "status", "stats", "fills", "reconcile"])
     ap.add_argument("--reason", default="STOP from command line")
     ap.add_argument("--wait", action="store_true", help="stop: wait until the running bot confirms the halt")
     a = ap.parse_args(argv)
@@ -91,6 +122,9 @@ def main(argv=None) -> None:
     if a.command != "stop":               # the kill switch must always work
         from .env_guard import check_env_safety
         check_env_safety()
+        if a.command in ("fills", "reconcile"):
+            from .trading.store import install_redaction
+            install_redaction()
     cfg = load_config()
     c = _db(cfg)
     if a.command == "stop":
@@ -106,6 +140,8 @@ def main(argv=None) -> None:
         _set(c, "kill_requested", None)
         _set(c, "resume_requested", time.time())
         print("Resume requested: the running bot resumes within ~1 second.")
+    elif a.command in ("fills", "reconcile"):
+        print(asyncio.run(_account_report(cfg, a.command, c)))
     elif a.command == "status":
         risk = c.execute("SELECT value FROM bot_state WHERE key='risk'").fetchone()
         print("mode:", (cfg.get("trading", {}) or {}).get("mode", "paper"))

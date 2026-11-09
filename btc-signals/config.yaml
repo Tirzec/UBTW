@@ -162,6 +162,11 @@ trading:
   live_trading_enabled: false      # second, explicit switch for live
   min_paper_trades_for_live: 300
   paper_count_from: "2026-11-09T21:25:00Z"   # entry/exit fix: only paper trades opened after this count
+  live_phase: 1                    # first live phase: hard caps in app/trading/live_phase.py
+                                   # ($1 stake, $10/day loss, 10 live trades/day; config can only lower them)
+  live_phase1:
+    max_trades_per_day: 10         # may be lowered, never raised above 10
+  reconcile_interval_s: 60         # compare bot vs exchange positions/orders; mismatch twice -> halt
   log_file: data/trader.log
   balance_check_s: 30
   entry:

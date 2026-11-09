@@ -86,6 +86,46 @@ def order_body(token: str, side: str, price: float, size: float, post_only: bool
     return body
 
 
+def outcome_unknown(e: Exception) -> bool:
+    """A failure where the order may or may not have been created (timeout, dropped connection,
+    server error) - as opposed to a clean rejection."""
+    m = str(e)
+    if "HTTP 5" in m:
+        return True
+    return any(k in m for k in ("Timeout", "RemoteProtocolError", "ReadError", "WriteError",
+                                "ConnectionReset", "NetworkError", "Disconnected"))
+
+
+def _ts_iso(s) -> float:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def parse_trades(d: dict, slug: str | None = None, since: float = 0.0) -> list[dict]:
+    """TRADE activities -> [{id, slug, price, qty, aggressor, ts, state}], newest first."""
+    out = []
+    for a in (d or {}).get("activities") or []:
+        t = a.get("trade") if isinstance(a, dict) else None
+        if not t:
+            continue
+        if slug and t.get("marketSlug") != slug:
+            continue
+        ts = _ts_iso(t.get("createTime"))
+        if ts < since:
+            continue
+        if t.get("state") in ("TRADE_STATE_BUSTED", "TRADE_STATE_REJECTED"):
+            continue
+        out.append({"id": str(t.get("id") or ""), "slug": t.get("marketSlug"),
+                    "price": _amt(t.get("price")) or 0.0,
+                    "qty": float(t.get("qtyDecimal") or t.get("qty") or 0),
+                    "aggressor": bool(t.get("isAggressor", True)), "ts": ts, "state": t.get("state", ""),
+                    "cost_basis": _amt(t.get("costBasis")), "realized": _amt(t.get("realizedPnl"))})
+    return out
+
+
 def _amt(x) -> float | None:
     if isinstance(x, dict):
         x = x.get("value")
@@ -136,6 +176,7 @@ class UsLiveBroker:
         # Orders are created asynchronously: right after POST /v1/orders, GET /v1/order/{id} can
         # answer 404 "Order not found" for a moment. Track which orders the exchange has shown us.
         self._seen: set[str] = set()
+        self._known_trades: set[str] = set()
         self.visibility_timeout_s = 10.0
         self.visibility_poll_s = 0.4
 
@@ -159,15 +200,23 @@ class UsLiveBroker:
     async def place_limit(self, *, token: str, side: str, price: float, size: float,
                           post_only: bool) -> OrderState:
         o = OrderState("", token, side, price, size, post_only)
+        body = order_body(token, side, price, size, post_only, self.tick_for(token))
+        t0 = time.time()
         try:
-            d = await self._req("POST", "/v1/orders", order_body(token, side, price, size, post_only,
-                                                                 self.tick_for(token)))
+            d = await self._req("POST", "/v1/orders", body)
         except BrokerError as e:
             if post_only and ("participate" in str(e).lower() or "would match" in str(e).lower()):
                 o.order_id, o.status = f"rejected-{uuid.uuid4().hex[:8]}", "rejected"
                 o.error = f"post_only_would_cross: {e}"
                 self.orders[o.order_id] = o
                 return o
+            if outcome_unknown(e):
+                # The request may have reached the exchange. NEVER blindly re-send: look for it first.
+                found = await self.find_lost_order(o, body, t0)
+                if found is not None:
+                    return found
+                raise BrokerError(f"order outcome unknown after '{e}'; not found on the exchange, "
+                                  "so it was not re-sent (reconciliation keeps watching)") from e
             raise
         self.last_create = d if isinstance(d, dict) else {}
         o.order_id = str(d.get("id") or d.get("orderId") or "")
@@ -175,6 +224,56 @@ class UsLiveBroker:
             raise BrokerError(f"no order id in response: {d}")
         self.orders[o.order_id] = o
         return await self.wait_visible(o.order_id, 3.0)
+
+    async def find_lost_order(self, o: OrderState, body: dict, t0: float, settle_s: float = 2.0,
+                              tries: int = 3) -> OrderState | None:
+        """After a network failure on POST /v1/orders: was the order created anyway?
+        Resting orders: an open order on the same market/intent/price/quantity we don't know yet.
+        Immediate orders: new trades on that market since we sent it (GET /v1/portfolio/activities).
+        The exchange has no client order ID, so this matching is the duplicate guard."""
+        slug = body["marketSlug"]
+        for i in range(tries):
+            await asyncio.sleep(settle_s if i == 0 else 1.0)
+            try:
+                d = await self._req("GET", "/v1/orders/open")
+                items = d.get("orders") if isinstance(d, dict) else d
+                for x in items or []:
+                    oid = str(x.get("id") or x.get("orderId") or "")
+                    px = x.get("price", {})
+                    px = px.get("value") if isinstance(px, dict) else px
+                    if (oid and oid not in self.orders and x.get("marketSlug") == slug
+                            and x.get("intent", body["intent"]) == body["intent"]
+                            and abs(float(px or -1) - float(body["price"]["value"])) < 1e-9
+                            and abs(float(x.get("quantity") or 0) - float(body["quantity"])) < 1e-9):
+                        o.order_id = oid
+                        self.orders[oid] = o
+                        self._seen.add(oid)
+                        return await self.poll(oid)
+                if not o.post_only:
+                    trades = await self.recent_trades(slug, since=t0 - 1.0)
+                    new = [t for t in trades if t["id"] not in self._known_trades]
+                    if new:
+                        self._known_trades.update(t["id"] for t in new)
+                        qty = sum(t["qty"] for t in new)
+                        _, leg = split_token(o.token)
+                        notional = sum(t["qty"] * (t["price"] if leg == "long" else 1 - t["price"]) for t in new)
+                        o.order_id = "recovered-" + new[0]["id"]
+                        o.filled, o.notional = min(qty, o.size), notional
+                        from ..fees import fee_usdc
+                        sched = self.fee_schedule_for(o.token)
+                        o.fee = sum(fee_usdc(t["qty"], t["price"], sched) for t in new if t.get("aggressor", True))
+                        o.status = "filled" if o.filled >= o.size - 1e-9 else "canceled"
+                        o.error = "recovered from trade history after a network error (fee estimated)"
+                        self.orders[o.order_id] = o
+                        return o
+            except BrokerError:
+                continue
+        return None
+
+    async def recent_trades(self, slug: str | None = None, since: float = 0.0) -> list[dict]:
+        """Your own fills from GET /v1/portfolio/activities (newest 100), parsed."""
+        d = await self._req("GET", "/v1/portfolio/activities")
+        return parse_trades(d, slug, since)
 
     async def preview(self, *, token: str, side: str, price: float, size: float, post_only: bool) -> dict:
         """POST /v1/order/preview: the exchange validates the order and shows expected values.

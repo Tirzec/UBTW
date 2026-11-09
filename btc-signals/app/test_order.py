@@ -303,9 +303,44 @@ def print_fill_report(r: dict) -> None:
           f"sell {(r['sell_slippage'] or 0):+.4f}/contract (received below the quoted bid)")
 
 
+# ----------------------------------------------------------------------------- kill switch
+async def kill_test(broker, w, bids, qty: float, rep: Report, cfg: dict, store=None, confirm=input) -> None:
+    """Place a 1c resting order, then fire the SAME exchange-side cancel the kill switch uses
+    (`python -m app.trader stop` -> cancel ALL open orders) and confirm the order is gone."""
+    from .trader import _direct_cancel_all
+    print(f"\nKILL SWITCH TEST: BUY {qty:g} Up @ 0.01 on {w.slug} (can't fill), then the kill switch's\n"
+          "cancel-all. NOTE: cancel-all cancels EVERY open order on your account, including any you placed.",
+          flush=True)
+    if confirm("Run the kill switch test? [y/N] ").strip().lower() not in ("y", "yes"):
+        raise Abort("cancelled by you; nothing was placed")
+    if bids[0][0] < 0.05:
+        raise Abort("best bid too close to 1c for a safe far-away order")
+    o = await broker.place_limit(token=w.token_up, side="BUY", price=0.01, size=qty, post_only=True)
+    if store:
+        store.order(o, None, "test_kill")
+    if o.status == "rejected":
+        rep.step("FAIL", f"order rejected: {o.error}")
+        return
+    listed = o.order_id in await broker.open_order_ids()
+    rep.step("PASS" if listed else "FAIL", f"resting order {o.order_id} is open" if listed else "order not listed")
+    t0 = time.time()
+    msg = await _direct_cancel_all(cfg)
+    rep.step("PASS" if "canceled" in msg else "FAIL", f"kill switch cancel-all: {msg} ({(time.time() - t0) * 1000:.0f} ms)")
+    gone = False
+    for _ in range(6):
+        await asyncio.sleep(0.5)
+        o.status = "live"
+        o = await broker.poll(o.order_id)
+        if o.status == "canceled" and o.order_id not in await broker.open_order_ids():
+            gone = True
+            break
+    rep.step("PASS" if gone else "FAIL", "confirmed: the order is canceled on the exchange" if gone
+             else f"order still {o.status} - cancel it in the Polymarket app")
+
+
 # ----------------------------------------------------------------------------- main
 async def run(cfg: dict, *, fill: bool, qty: float | None, prefer: str, confirm=input, input_fn=input,
-              broker=None, gw: httpx.AsyncClient | None = None) -> Report:
+              broker=None, gw: httpx.AsyncClient | None = None, kill: bool = False) -> Report:
     from .trading.us_broker import UsLiveBroker
     rep = Report()
     key_id = os.environ.get("POLYMARKET_KEY_ID", "").strip()
@@ -341,6 +376,9 @@ async def run(cfg: dict, *, fill: bool, qty: float | None, prefer: str, confirm=
         known = set(broker.orders)
         result = {}
         try:
+            if kill:
+                await kill_test(broker, w, bids, q, rep, cfg, store, confirm)
+                return rep
             await part1(broker, w, bids, asks, q, rep, store, confirm)
             if fill:
                 if not rep.ok:
@@ -348,6 +386,14 @@ async def run(cfg: dict, *, fill: bool, qty: float | None, prefer: str, confirm=
                 max_cost = float(((cfg.get("trading", {}) or {}).get("risk", {}) or {}).get("max_stake_usd", 1))
                 result = await part2(broker, gw, w, q, rep, store, input_fn, max_cost=max_cost)
                 print_fill_report(result)
+                try:                                  # the exchange's own trade records = ground truth
+                    trades = await broker.recent_trades(w.slug, since=time.time() - 120)
+                    if trades:
+                        print("exchange trade records for these fills: " + "; ".join(
+                            f"{t['qty']:g} @ {t['price']:.4f} ({'taker' if t['aggressor'] else 'maker'})"
+                            for t in trades))
+                except Exception as e:  # noqa: BLE001
+                    print(f"(could not read trade records: {e})")
         except BaseException:
             await cancel_new_orders(broker, known)
             raise
@@ -370,6 +416,8 @@ def main(argv=None) -> int:
     ap.add_argument("--fill", action="store_true", help="also do PART 2: a real minimum-size buy + immediate sell")
     ap.add_argument("--qty", type=float, help="contracts (default: the market minimum)")
     ap.add_argument("--market", choices=["5m", "15m"], default="15m")
+    ap.add_argument("--kill-test", action="store_true",
+                    help="test the kill switch live: 1c resting order, then the kill switch's cancel-all")
     a = ap.parse_args(argv)
     from .console import safe_console
     safe_console()
@@ -391,7 +439,7 @@ def main(argv=None) -> int:
         print("Fix the clock first (python -m app.clock).")
         return 1
     try:
-        rep = asyncio.run(run(cfg, fill=a.fill, qty=a.qty, prefer=a.market))
+        rep = asyncio.run(run(cfg, fill=a.fill, qty=a.qty, prefer=a.market, kill=a.kill_test))
     except Abort as e:
         print(f"\nSTOPPED: {e}")
         return 1
