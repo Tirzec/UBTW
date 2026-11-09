@@ -89,3 +89,22 @@ svg text { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
 .lbl-bullish { color: var(--up); } .lbl-bearish { color: var(--down); } .lbl-neutral { color: var(--muted); }
 .alert { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .alert.lvl-signal b { color: var(--accent); } .alert.lvl-warn b { color: var(--warn); }
+
+/* auto-trader */
+.bot-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+.mode-badge { font-size: 40px; font-weight: 900; letter-spacing: .06em; padding: 4px 18px; border-radius: 10px; }
+.mode-badge.paper { background: #0d3b66; color: #9ecbff; }
+.mode-badge.live { background: var(--bad); color: #fff; animation: pulse 1.5s infinite; }
+.mode-badge.off { background: var(--panel2); color: var(--muted); }
+@keyframes pulse { 50% { opacity: .75; } }
+.bot-status { flex: 1; min-width: 200px; }
+.bot-state { font-size: 18px; font-weight: 700; }
+.bot-state.halted { color: var(--bad); } .bot-state.paused { color: var(--warn); } .bot-state.running { color: var(--up); }
+.bot-buttons { display: flex; gap: 10px; }
+button.stop { background: var(--bad); border-color: var(--bad); color: #fff; font-size: 22px; font-weight: 900;
+  padding: 12px 28px; letter-spacing: .08em; }
+button.stop:hover { filter: brightness(1.15); }
+button.resume { background: var(--up); border-color: var(--up); color: #fff; font-weight: 700; padding: 12px 18px; }
+#bot-risk { margin-top: 12px; }
+.pos { color: var(--up); } .neg { color: var(--down); }
+.trigger { font-size: 11px; color: var(--muted); }

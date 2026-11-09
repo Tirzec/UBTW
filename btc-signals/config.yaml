@@ -124,9 +124,53 @@ derivatives:
   hyperliquid_url: https://api.hyperliquid.xyz/info
   binance_url: https://fapi.binance.com
 
-paper:
+paper:                              # signal log: every signal as a $50 hypothetical trade
   enabled: true
   stake_usd: 50
+
+# ---------------------------------------------------------------------------
+# Auto-trader. PAPER by default: simulated fills against the real order book.
+# LIVE needs ALL of: mode: live, live_trading_enabled: true, >= min_paper_trades_for_live
+# closed paper trades, Python 3.11+ with polymarket-client, keys in .env, an eligible
+# location (Polymarket blocks the US), and the confirmation phrase typed at startup.
+# ---------------------------------------------------------------------------
+trading:
+  enabled: true
+  mode: paper                      # paper | live
+  live_trading_enabled: false      # second, explicit switch for live
+  min_paper_trades_for_live: 300
+  log_file: data/trader.log
+  balance_check_s: 30
+  entry:
+    stake_usd: 5                   # capped by risk.max_stake_usd
+    order_style: maker             # maker = post-only limit at/inside the bid (0 fee, may not fill)
+                                   # taker = limit at the ask (fills now, pays the taker fee)
+    order_timeout_s: 8             # cancel an unfilled entry after this long
+    no_entry_last_s_5m: 60         # no entries in the last 60s of a 5m window...
+    no_entry_last_s_15m: 120       # ...or the last 2 min of a 15m window...
+    late_entry_min_edge: 0.12      # ...unless the edge is at least this
+    reentry_cooldown_s: 20         # one position per window at a time; wait after closing
+    max_entries_per_window: 2      # at most this many trades in any one window
+  exits:
+    check_interval_s: 1
+    take_profit_pct: 0.08          # sell at +8% after fees (sellable at the current bid)
+    stop_loss_pct: 0.10            # sell at -10% after fees
+    stop_loss_grace_s: 0           # optional: for N s after a fill only hard_stop_pct applies
+    hard_stop_pct: 0.25            #   (spread + exit fee alone can be ~-10% right after a fill)
+    flip_threshold: 0.50           # sell if model P(our side wins) drops below this
+    time_exit_s_5m: 20             # final hold-or-sell decision this long before close
+    time_exit_s_15m: 30
+    hold_min_ev: 0.02              # hold to resolution only if E[payout] beats selling by this per share
+    exit_slippage_ticks: 2         # exit limit = best bid - 2 ticks (marketable, fills now)
+    exit_order_timeout_s: 3
+  risk:
+    max_stake_usd: 5
+    daily_loss_limit_usd: 25
+    max_consecutive_losses: 5
+    max_total_exposure_usd: 15
+    min_wallet_balance_usd: 10
+    max_api_errors: 3              # this many errors...
+    api_error_window_s: 300        # ...within this window -> pause
 
 alerts:
   sound: true
@@ -138,6 +182,6 @@ notifications:
   ntfy_server: https://ntfy.sh
   # which alerts to push: signal (new trade signal), exit (SELL/HOLD change on your positions),
   # degraded (data went bad / recovered), rules (market rules changed), settled (window results)
-  kinds: [signal, exit, degraded, rules]
+  kinds: [signal, exit, degraded, rules, trade, risk]
   min_interval_s: 2
   click_url: ""                    # optional: link opened when you tap the notification

@@ -17,15 +17,17 @@ import httpx
 
 log = logging.getLogger("notify")
 
-PRIORITY = {"signal": 4, "exit": 4, "degraded": 3, "settled": 2, "rules": 4, "test": 3}
+PRIORITY = {"signal": 4, "exit": 4, "degraded": 3, "settled": 2, "rules": 4, "test": 3,
+            "trade": 3, "risk": 5}
 TAGS = {"signal": "chart_with_upwards_trend", "exit": "rotating_light", "degraded": "warning",
-        "settled": "checkered_flag", "rules": "no_entry", "test": "white_check_mark"}
+        "settled": "checkered_flag", "rules": "no_entry", "test": "white_check_mark",
+        "trade": "moneybag", "risk": "octagonal_sign"}
 
 
 class Notifier:
     def __init__(self, cfg: dict, client: httpx.AsyncClient | None = None):
         nc = cfg.get("notifications", {}) or {}
-        self.kinds = set(nc.get("kinds", ["signal", "exit", "degraded", "rules"]))
+        self.kinds = set(nc.get("kinds", ["signal", "exit", "degraded", "rules", "trade", "risk"]))
         self.min_interval_s = float(nc.get("min_interval_s", 2))
         self.click_url = nc.get("click_url") or ""
         self.ntfy_server = (nc.get("ntfy_server") or "https://ntfy.sh").rstrip("/")

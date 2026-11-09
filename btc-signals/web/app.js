@@ -40,6 +40,8 @@ function beep(freq = 880, dur = 0.2, times = 1) {
 function notify(a) {
   if (!alertsOn) return;
   if (a.kind === "signal") beep(988, 0.18, 3);
+  else if (a.kind === "risk") beep(300, 0.4, 3);
+  else if (a.kind === "trade") beep(740, 0.12, 1);
   else if (a.kind === "exit") beep(a.level === "signal" ? 660 : 520, 0.25, 2);
   else if (a.kind === "degraded") beep(330, 0.35, 1);
   if ("Notification" in window && Notification.permission === "granted") {
@@ -220,8 +222,67 @@ function renderAlerts(s) {
     <span class="muted">${new Date(a.ts * 1000).toLocaleTimeString()}</span> <b>${esc(a.title)}</b> ${esc(a.body)}</div>`).join("") || '<p class="muted">no alerts yet</p>';
 }
 
+function renderBot(b) {
+  const badge = $("bot-mode");
+  const mode = (b && b.mode) || "off";
+  $("brand-sub").textContent = mode === "live" ? "LIVE: places real orders" : mode === "paper" ? "paper trading: no real orders" : "signals only: never trades";
+  badge.textContent = mode === "off" ? "TRADER OFF" : mode.toUpperCase();
+  badge.className = "mode-badge " + mode;
+  if (mode === "off") { $("bot-status-line").textContent = "auto-trader disabled in config.yaml"; return; }
+  const r = b.risk || {};
+  const line = $("bot-status-line");
+  if (r.halted) { line.textContent = "HALTED: " + r.halt_reason; line.className = "bot-state halted"; }
+  else if (r.day_stopped) { line.textContent = "Stopped for today: daily loss limit hit"; line.className = "bot-state paused"; }
+  else { line.textContent = mode === "live" ? "Trading with REAL money" : "Paper trading (simulated fills on the real order book)"; line.className = "bot-state running"; }
+  $("bot-resume").classList.toggle("hidden", !(r.halted || r.day_stopped));
+  $("bot-resume").disabled = !r.halted;
+  $("bot-note").textContent = (b.status_note || "") + (b.balance != null ? `  ·  balance ${usd(b.balance)}` : "");
+  const t = b.stats_today || {}, a = b.stats_all || {};
+  const cell = (label, v, cls = "") => `<div><span class="label">${label}</span><b class="${cls}">${v}</b></div>`;
+  const pn = (x) => (x == null ? "–" : signed(x));
+  const cls = (x) => (x == null ? "" : x >= 0 ? "pos" : "neg");
+  $("bot-risk").innerHTML =
+    cell("Today's P&L", pn(r.day_pnl), cls(r.day_pnl)) +
+    cell("To daily limit", usd(r.distance_to_daily_limit) + ` <span class="muted">of ${usd(r.daily_loss_limit, 0)}</span>`) +
+    cell("Today win rate", t.n ? `${pct(t.win_rate)} <span class="muted">(${t.n})</span>` : "–") +
+    cell("Losses in a row", `${r.consecutive_losses ?? 0} / ${r.max_consecutive_losses ?? "–"}`) +
+    cell("Avg win / avg loss", a.n ? `${pn(a.avg_win)} / ${pn(a.avg_loss)}` : "–") +
+    cell("All-time P&L", a.n ? pn(a.total_pnl) : "–", cls(a.total_pnl)) +
+    cell("All-time win rate", a.n ? `${pct(a.win_rate)} <span class="muted">(${a.n})</span>` : "–") +
+    cell("Fees paid", a.n ? usd(a.fees_paid) : "–");
+  const ps = (b.positions || []).map((p) => {
+    const held = (p.shares || 0) - (p.exit_shares || 0);
+    const pnlPct = p.last_pnl != null && p.cost ? p.last_pnl / (p.cost + p.entry_fee) : null;
+    return `<tr><td>#${p.id} ${esc(p.duration)} <b>${esc(p.side)}</b><br><span class="muted">${esc(p.status)} · ${mmss(p.seconds_left)} left</span></td>
+      <td class="num">${p.status === "opening" ? `bid ${num(p.entry_price)}` : num(p.entry_price, 3)} × ${num(held || 0, 2)}<br><span class="muted">cost ${usd((p.cost || 0) + (p.entry_fee || 0))}</span></td>
+      <td class="num">${p.last_value == null ? "–" : usd(p.last_value)}<br><span class="${cls(p.last_pnl)}">${pn(p.last_pnl)} ${pnlPct == null ? "" : "(" + signed(pnlPct * 100, 1) + "%)"}</span></td>
+      <td class="num trigger">TP bid ≥ ${num(p.tp_price)}<br>SL bid ≤ ${num(p.sl_price)}</td>
+      <td class="muted">${esc(p.last_note || p.exit_reason || "")}</td></tr>`;
+  }).join("");
+  $("bot-positions").innerHTML = ps ? `<div class="table-wrap"><table><tr><th>Position</th><th class="num">Entry × shares</th><th class="num">Sellable now (P&L)</th><th class="num">Triggers</th><th>Status</th></tr>${ps}</table></div>` : '<p class="muted">none</p>';
+  const tr = (b.trades || []).slice(0, 25).map((p) => `<tr><td>${new Date(p.closed_ts * 1000).toLocaleTimeString()}</td>
+      <td>${esc(p.duration)} <b>${esc(p.side)}</b></td><td class="num">${num(p.entry_price, 3)} → ${p.exit_price ? num(p.exit_price, 3) : (p.payout ? "1.00" : "0.00")}</td>
+      <td class="num ${cls(p.pnl)}">${pn(p.pnl)}</td><td><span class="tag">${esc(p.exit_trigger || "resolution")}</span> <span class="muted">${esc(p.exit_reason || "")}</span></td></tr>`).join("");
+  $("bot-trades").innerHTML = tr ? `<div class="table-wrap"><table><tr><th>Closed</th><th>Trade</th><th class="num">Entry → exit</th><th class="num">P&L</th><th>Why it exited</th></tr>${tr}</table></div>` : '<p class="muted">no closed trades yet</p>';
+  const need = b.paper_trades_required || 300, done = b.paper_trades_done || 0;
+  $("bot-paper").textContent = mode === "paper"
+    ? `Paper trades completed: ${done} / ${need} required before live mode can be enabled. Entries are post-only limit orders (0 fee); exits sell at the bid (taker fee). All P&L includes fees.`
+    : `LIVE · stake ${usd((b.settings || {}).stake)} · TP +${pct((b.settings || {}).take_profit_pct, 0)} / SL -${pct((b.settings || {}).stop_loss_pct, 0)}`;
+}
+
+$("bot-stop").onclick = async () => {
+  if (!confirm("STOP: cancel all open orders and halt the auto-trader?")) return;
+  const r = await fetch("/api/bot/stop", { method: "POST" });
+  if (!r.ok) alert("STOP failed: " + (await r.text()) + "\nUse: python -m app.trader stop");
+};
+$("bot-resume").onclick = async () => {
+  if (!confirm("Resume automated trading?")) return;
+  await fetch("/api/bot/resume", { method: "POST" });
+};
+
 function render(s) {
   state = s;
+  renderBot(s.bot);
   renderTop(s);
   renderWindow("5m", (s.windows || {})["5m"]);
   renderWindow("15m", (s.windows || {})["15m"]);

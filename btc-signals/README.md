@@ -38,7 +38,7 @@ cd btc-signals
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env            # optional: Polymarket API keys for the PolyBolt feed
-python -m pytest                # 77 tests, about 1 s
+python -m pytest                # 101 tests, about 1 s
 python -m app.main              # open http://127.0.0.1:8000
 ```
 
@@ -71,6 +71,74 @@ Spot: `ws-feed.exchange.coinbase.com`, `ws.kraken.com`. Derivatives: `api.hyperl
 News: CoinDesk, Cointelegraph, Decrypt, The Block RSS. Calendar: `nfs.faireconomy.media`.
 Phone alerts: `ntfy.sh` or `api.telegram.org`.
 Backtest bars: `data-api.binance.vision`. Binance's trading API is geo-blocked in the US and is off by default.
+
+---
+
+## Auto-trader (PAPER by default)
+
+The app can trade by itself. It starts in **PAPER** mode: real signals, real Polymarket order
+books, simulated fills, no money. Every order, fill, cancel and error is written to SQLite
+(`bot_orders`, `bot_events`, `bot_positions` in `data/signals.db`) and to `data/trader.log`.
+
+### Fees (confirmed from Polymarket's docs, Nov 2026)
+Crypto Up/Down markets charge **takers** `shares × 0.07 × p × (1 − p)` (max 1.75¢/share at 50¢).
+**Makers pay 0.** The rate comes from each market's `feeSchedule`, so a change is picked up
+automatically.
+- **Entries** are **post-only limit orders**. They rest on the book, so they pay **no fee and no
+  spread**, but they may not fill. Unfilled orders are cancelled after `order_timeout_s` (8s).
+- **Exits** are limit sells at the bid minus 2 ticks, so they fill immediately and **pay the taker fee**.
+- Every P&L number (take profit, stop loss, dashboard, stats) is net of the fees actually paid.
+
+### What it does
+| | Default | Setting (`trading:` in config.yaml) |
+|---|---|---|
+| Enter only on a signal (edge > fees + spread + buffer) | existing signal logic | `signal.buffer` |
+| No entries late in the window | last 60s (5m), last 120s (15m) | `entry.no_entry_last_s_*` |
+| ...unless the edge is very high | edge ≥ 0.12 | `entry.late_entry_min_edge` |
+| One position per window at a time | max 2 entries per window | `entry.max_entries_per_window` |
+| Take profit | +8% after fees, or the bid reaches the model's fair value | `exits.take_profit_pct` |
+| Stop loss | −10% after fees, or the model's P(win) drops below 50% | `exits.stop_loss_pct`, `exits.flip_threshold` |
+| Time exit | 20s (5m) / 30s (15m) before close: hold only if E[payout] beats selling by 2¢/share | `exits.time_exit_s_*`, `exits.hold_min_ev` |
+| Exit checks | every 1s, valuing only what the current bids can absorb | `exits.check_interval_s` |
+
+### Risk controls
+| Control | Default | What happens |
+|---|---|---|
+| Max stake per trade | $5 | hard cap |
+| Daily loss limit | $25 | no new trades until local midnight |
+| Consecutive losses | 5 | pause and alert; you press Resume |
+| Max total exposure | $15 | new entries blocked |
+| Degraded data | – | no new entries while degraded; open positions use price-based exits only |
+| API errors | 3 in 5 min | pause and alert |
+| Wallet balance | below $10 | pause and alert |
+| **Kill switch** | – | the big **STOP** button, or `python -m app.trader stop`: cancels every open order and halts all trading. Open positions are left for you to manage. Survives restarts. |
+
+Command line:
+```bash
+python -m app.trader stop      # kill switch (works even while the app is running)
+python -m app.trader resume
+python -m app.trader status
+python -m app.trader stats     # paper and live results
+```
+
+### LIVE mode (real money)
+LIVE refuses to start unless **all** of these hold:
+1. `trading.mode: live` **and** `trading.live_trading_enabled: true` in config.yaml
+2. At least **300 closed paper trades**. Your paper stats are printed for you to review.
+3. **Python 3.11+** with `pip install "polymarket-client>=0.12.0"`, the official SDK, which needs 3.11.
+   macOS's built-in Python 3.9 can only run paper mode; install Python 3.12 from python.org for live.
+4. `POLYMARKET_PRIVATE_KEY` and `POLYMARKET_WALLET_ADDRESS` in `.env`
+5. **Polymarket's geoblock check passes.** The **United States is blocked** (close-only) on
+   polymarket.com and its API. From the US, LIVE mode will refuse to start. Do not use a VPN to
+   get around this: it breaks Polymarket's terms and they can freeze your funds.
+6. You type `I UNDERSTAND THIS TRADES REAL MONEY` in the terminal.
+
+In LIVE mode the bot sends Polymarket **order heartbeats** every 5s. If the app crashes or loses
+its connection, Polymarket automatically cancels its open orders after 10s.
+
+**Security:** keys live only in `.env`, which is git-ignored, and are redacted from all logs.
+**Use a separate wallet funded only with what you're willing to lose.** Never put your main
+wallet's key in this app.
 
 ---
 
@@ -308,8 +376,10 @@ app/signal.py    entry decision      app/exits.py   SELL/HOLD    app/fees.py  fe
 app/engine.py    live loop           app/paper.py   paper trader + stats   app/db.py  SQLite
 app/main.py      FastAPI + websocket web/           dashboard (plain HTML/JS)
 app/notify.py    phone push alerts (ntfy / Telegram)
+app/trading/     auto-trader: rules, risk, paper/live brokers, audit store, live gate
+app/trader.py    kill switch / status CLI
 backtest/        collect / replay / train / report
-tests/           77 tests: features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
+tests/           101 tests: features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
                  parsers and staleness, degraded-data end-to-end, books, model, backtester
 docs/ARCHITECTURE.md   research notes and design
 ```

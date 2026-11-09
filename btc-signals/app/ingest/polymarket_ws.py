@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 import logging
 import time
 
@@ -18,6 +19,7 @@ class OrderBook:
         self.asks: dict[float, float] = {}
         self.updated = 0.0
         self.last_trade: float | None = None
+        self.trades: deque[tuple[float, float, float]] = deque(maxlen=500)  # (ts, price, size)
 
     def snapshot(self, bids: list, asks: list, ts: float) -> None:
         self.bids = {float(x["price"]): float(x["size"]) for x in bids if float(x["size"]) > 0}
@@ -64,8 +66,14 @@ class BookStore:
                 self.book(ch["asset_id"]).level(ch["side"], float(ch["price"]),
                                                 float(ch["size"]), now)
         elif et == "last_trade_price" and msg.get("asset_id"):
-            self.book(msg["asset_id"]).last_trade = float(msg["price"])
-            self.book(msg["asset_id"]).updated = now
+            b = self.book(msg["asset_id"])
+            b.last_trade = float(msg["price"])
+            b.trades.append((now, float(msg["price"]), float(msg.get("size") or 0)))
+            b.updated = now
+
+    def trades_since(self, asset_id: str, since: float) -> list[tuple[float, float, float]]:
+        b = self.books.get(asset_id)
+        return [t for t in b.trades if t[0] >= since] if b else []
 
     def get(self, asset_id: str) -> dict | None:
         b = self.books.get(asset_id)

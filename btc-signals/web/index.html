@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand">BTC Up/Down Signals <span class="muted">advisory only, never trades</span></div>
+  <div class="brand">BTC Up/Down Signals <span class="muted" id="brand-sub"></span></div>
   <div class="prices">
     <div><span class="label">Chainlink</span> <b id="ref-spot">–</b> <span id="ref-src" class="tag"></span></div>
     <div><span class="label">60s TWAP</span> <b id="ref-twap">–</b></div>
@@ -26,6 +26,22 @@
 <div id="banner-blackout" class="banner warn hidden"></div>
 
 <main>
+  <section class="card bot" id="bot">
+    <div class="bot-head">
+      <div id="bot-mode" class="mode-badge">–</div>
+      <div class="bot-status"><div id="bot-status-line" class="bot-state">auto-trader starting…</div>
+        <div id="bot-note" class="muted"></div></div>
+      <div class="bot-buttons">
+        <button id="bot-resume" class="resume hidden">Resume trading</button>
+        <button id="bot-stop" class="stop">STOP</button>
+      </div>
+    </div>
+    <div id="bot-risk" class="stats"></div>
+    <h3>Open positions</h3><div id="bot-positions"></div>
+    <h3>Trade log</h3><div id="bot-trades"></div>
+    <p id="bot-paper" class="muted"></p>
+  </section>
+
   <section class="windows">
     <article class="card window" id="w-5m"></article>
     <article class="card window" id="w-15m"></article>

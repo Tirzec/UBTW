@@ -39,3 +39,21 @@ def gamma_event(duration="5m", lookback=60, closed=False, outcome_prices=("0.5",
             "acceptingOrders": not closed, "closed": closed,
         }],
     }
+
+
+import logging  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_trade_log(tmp_path, monkeypatch):
+    """Tests must never write to the real audit log (data/trader.log)."""
+    import app.trading.store as store
+    real = store.setup_trade_log
+    monkeypatch.setattr(store, "setup_trade_log", lambda path: real(tmp_path / "trader.log"))
+    yield
+    lg = logging.getLogger("trader")
+    for h in [h for h in lg.handlers if getattr(h, "_trade_log", False)]:
+        lg.removeHandler(h)
+        h.close()

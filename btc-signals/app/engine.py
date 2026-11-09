@@ -84,6 +84,17 @@ class Engine:
         self._started = time.time()
         self._was_degraded = None
         self.loop_lag_ms = 0.0
+        self.trader = None
+        tc = cfg.get("trading", {}) or {}
+        self.trading_enabled = bool(tc.get("enabled", True))
+        mode = "live" if cfg.get("_live_confirmed") else "paper"
+        if tc.get("mode") == "live" and mode != "live":
+            log.warning("trading.mode is live but the live checks were not passed - running PAPER")
+        self.trade_mode = mode
+        if self.trading_enabled:
+            from .trading.store import TradeStore, setup_trade_log
+            setup_trade_log(resolve_path(cfg, tc.get("log_file", "data/trader.log")))
+            self.trade_store = TradeStore(self.db, mode)
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -93,6 +104,25 @@ class Engine:
                            ("calendar", self.calendar.run()), ("signals", self._signal_loop()),
                            ("exits", self._exit_loop())):
             self._tasks.append(asyncio.create_task(self._guard(name, coro), name=name))
+        if self.trading_enabled:
+            await self._start_trader()
+
+    def fee_schedule_for(self, token: str) -> dict:
+        for w in self.discovery.windows.values():
+            if token in (w.token_up, w.token_down):
+                return w.fee_schedule
+        return {}
+
+    async def _start_trader(self) -> None:
+        from .trading.broker import LiveBroker, PaperBroker
+        from .trading.trader import AutoTrader
+        if self.trade_mode == "live":
+            creds = self.cfg["_live_confirmed"]
+            broker = await LiveBroker.connect(creds["private_key"], creds["wallet"], self.fee_schedule_for)
+        else:
+            broker = PaperBroker(self.clob.store.get, self.clob.store.trades_since, self.fee_schedule_for)
+        self.trader = AutoTrader(self, self.cfg, broker, self.trade_store)
+        await self.trader.start()
 
     async def _guard(self, name: str, coro) -> None:
         try:
@@ -103,6 +133,8 @@ class Engine:
             log.exception("task %s crashed", name)
 
     async def stop(self) -> None:
+        if self.trader:
+            await self.trader.stop()
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -462,4 +494,5 @@ class Engine:
             "derivs": self.derivs.snapshot(),
             "notifications": self.notifier.status(),
             "alerts": list(self.alerts)[-20:],
+            "bot": self.trader.snapshot(now) if self.trader else {"mode": "off"},
         }

@@ -1,0 +1,166 @@
+"""Audit trail for the auto-trader: SQLite tables + a log file. Secrets are redacted."""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS bot_positions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT, slug TEXT, duration TEXT, side TEXT,
+  token TEXT, condition_id TEXT, status TEXT,            -- opening|open|closing|resolving|closed|void
+  shares REAL DEFAULT 0, entry_price REAL, cost REAL DEFAULT 0, entry_fee REAL DEFAULT 0,
+  p_model REAL, edge REAL, opened_ts REAL, filled_ts REAL,
+  exit_shares REAL DEFAULT 0, exit_proceeds REAL DEFAULT 0, exit_fee REAL DEFAULT 0,
+  exit_price REAL, exit_reason TEXT, exit_trigger TEXT, payout REAL DEFAULT 0,
+  pnl REAL, won INTEGER, closed_ts REAL, entry_order TEXT, exit_order TEXT,
+  tp_price REAL, sl_price REAL, last_value REAL, last_pnl REAL, last_note TEXT
+);
+CREATE INDEX IF NOT EXISTS bot_pos_status ON bot_positions(mode, status);
+CREATE TABLE IF NOT EXISTS bot_orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, mode TEXT, position_id INTEGER,
+  order_id TEXT, token TEXT, side TEXT, price REAL, size REAL, post_only INTEGER,
+  status TEXT, filled REAL, avg_price REAL, fee REAL, purpose TEXT, error TEXT, updated REAL
+);
+CREATE TABLE IF NOT EXISTS bot_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, mode TEXT, level TEXT, kind TEXT,
+  message TEXT, data TEXT
+);
+CREATE TABLE IF NOT EXISTS bot_state (key TEXT PRIMARY KEY, value TEXT, updated REAL);
+"""
+
+SECRET_ENV = ("POLYMARKET_PRIVATE_KEY", "POLY_API_SECRET", "POLY_API_PASSPHRASE", "POLY_API_KEY",
+              "TELEGRAM_BOT_TOKEN", "NTFY_TOKEN")
+_HEX_KEY = re.compile(r"\b(0x)?[0-9a-fA-F]{64}\b")
+
+
+class RedactSecrets(logging.Filter):
+    """Masks private keys / API secrets in every log record, wherever they come from."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.values = [v for k in SECRET_ENV if len(v := os.environ.get(k, "")) >= 8]
+
+    def _clean(self, s: str) -> str:
+        for v in self.values:
+            s = s.replace(v, "***REDACTED***")
+        return _HEX_KEY.sub("***REDACTED-KEY***", s)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        clean = self._clean(msg)
+        if clean != msg:
+            record.msg, record.args = clean, ()
+        return True
+
+
+def install_redaction() -> None:
+    f = RedactSecrets()
+    root = logging.getLogger()
+    root.addFilter(f)
+    for h in root.handlers:
+        h.addFilter(f)
+
+
+def setup_trade_log(path: Path) -> None:
+    log = logging.getLogger("trader")
+    if any(getattr(h, "_trade_log", False) for h in log.handlers):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    h = RotatingFileHandler(path, maxBytes=10_000_000, backupCount=5)
+    h._trade_log = True  # type: ignore[attr-defined]
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s"))
+    h.addFilter(RedactSecrets())
+    log.addHandler(h)
+    log.setLevel(logging.INFO)
+
+
+class TradeStore:
+    def __init__(self, db, mode: str):
+        self.db = db
+        self.mode = mode
+        db.conn.executescript(SCHEMA)
+        db.conn.commit()
+        self.log = logging.getLogger("trader")
+
+    # ---------------------------------------------------------------- events
+    def event(self, kind: str, message: str, level: str = "INFO", **data) -> None:
+        self.db.execute("INSERT INTO bot_events (ts,mode,level,kind,message,data) VALUES (?,?,?,?,?,?)",
+                        (time.time(), self.mode, level, kind, message, json.dumps(data, default=str)))
+        self.log.log(getattr(logging, level, logging.INFO), "[%s] %s %s %s", self.mode.upper(), kind,
+                     message, json.dumps(data, default=str) if data else "")
+
+    def order(self, o, position_id: int | None, purpose: str) -> None:
+        row = self.db.query("SELECT id FROM bot_orders WHERE order_id=? AND mode=?", (o.order_id, self.mode))
+        vals = (o.status, o.filled, o.avg_price, o.fee, o.error, time.time())
+        if row:
+            self.db.execute("UPDATE bot_orders SET status=?, filled=?, avg_price=?, fee=?, error=?, "
+                            "updated=? WHERE id=?", vals + (row[0]["id"],))
+        else:
+            self.db.execute("INSERT INTO bot_orders (ts,mode,position_id,order_id,token,side,price,size,"
+                            "post_only,status,filled,avg_price,fee,purpose,error,updated) VALUES "
+                            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (o.created, self.mode, position_id, o.order_id, o.token, o.side, o.price,
+                             o.size, int(o.post_only)) + vals[:4] + (purpose, o.error, time.time()))
+
+    # ---------------------------------------------------------------- positions
+    def new_position(self, **kw) -> int:
+        kw.setdefault("mode", self.mode)
+        return self.db.insert("bot_positions", kw)
+
+    def update_position(self, pid: int, **kw) -> None:
+        sets = ",".join(f"{k}=?" for k in kw)
+        self.db.execute(f"UPDATE bot_positions SET {sets} WHERE id=?", tuple(kw.values()) + (pid,))
+
+    def position(self, pid: int) -> dict:
+        return self.db.query("SELECT * FROM bot_positions WHERE id=?", (pid,))[0]
+
+    def active_positions(self) -> list[dict]:
+        return self.db.query("SELECT * FROM bot_positions WHERE mode=? AND status IN "
+                             "('opening','open','closing','resolving') ORDER BY id", (self.mode,))
+
+    def closed_positions(self, mode: str | None = None, since: float = 0, limit: int = 100000) -> list[dict]:
+        return self.db.query("SELECT * FROM bot_positions WHERE mode=? AND status='closed' AND closed_ts>=? "
+                             "ORDER BY closed_ts LIMIT ?", (mode or self.mode, since, limit))
+
+    # ---------------------------------------------------------------- state
+    def get_state(self, key: str, default=None):
+        r = self.db.query("SELECT value FROM bot_state WHERE key=?", (key,))
+        return json.loads(r[0]["value"]) if r else default
+
+    def set_state(self, key: str, value) -> None:
+        self.db.execute("INSERT INTO bot_state (key,value,updated) VALUES (?,?,?) ON CONFLICT(key) "
+                        "DO UPDATE SET value=excluded.value, updated=excluded.updated",
+                        (key, json.dumps(value), time.time()))
+
+
+def bot_stats(rows: list[dict]) -> dict:
+    """Win rate, average win vs loss, P&L, drawdown for closed bot positions."""
+    pnls = [r["pnl"] for r in rows if r.get("pnl") is not None]
+    if not pnls:
+        return {"n": 0}
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    peak = cum = dd = 0.0
+    for p in pnls:
+        cum += p
+        peak = max(peak, cum)
+        dd = max(dd, peak - cum)
+    stake = sum((r["cost"] or 0) + (r["entry_fee"] or 0) for r in rows)
+    triggers: dict[str, int] = {}
+    for r in rows:
+        k = r.get("exit_trigger") or "resolution"
+        triggers[k] = triggers.get(k, 0) + 1
+    return {
+        "n": len(pnls), "wins": len(wins), "losses": len(losses),
+        "win_rate": len(wins) / len(pnls), "total_pnl": sum(pnls),
+        "avg_win": sum(wins) / len(wins) if wins else 0.0,
+        "avg_loss": sum(losses) / len(losses) if losses else 0.0,
+        "ev_per_trade": sum(pnls) / len(pnls), "return_on_stake": sum(pnls) / stake if stake else 0.0,
+        "max_drawdown": dd, "fees_paid": sum((r["entry_fee"] or 0) + (r["exit_fee"] or 0) for r in rows),
+        "exit_triggers": triggers,
+    }

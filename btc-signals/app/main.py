@@ -85,6 +85,30 @@ def create_app(cfg: dict | None = None, start_engine: bool = True) -> FastAPI:
             raise HTTPException(400, str(e)) from e
         return {"id": pid}
 
+    @app.post("/api/bot/stop")
+    async def bot_stop():
+        t = app.state.engine.trader
+        if t is None:
+            raise HTTPException(400, "auto-trader not running")
+        n = await t.kill("STOP button on dashboard")
+        return {"ok": True, "canceled": n}
+
+    @app.post("/api/bot/resume")
+    async def bot_resume():
+        t = app.state.engine.trader
+        if t is None:
+            raise HTTPException(400, "auto-trader not running")
+        t.resume()
+        return {"ok": True}
+
+    @app.get("/api/bot/trades")
+    async def bot_trades(limit: int = 200):
+        return app.state.engine.db.query("SELECT * FROM bot_positions ORDER BY id DESC LIMIT ?", (limit,))
+
+    @app.get("/api/bot/events")
+    async def bot_events(limit: int = 200):
+        return app.state.engine.db.query("SELECT * FROM bot_events ORDER BY id DESC LIMIT ?", (limit,))
+
     @app.post("/api/positions/{pid}/close")
     async def close_position(pid: int):
         app.state.engine.close_position(pid)
@@ -143,6 +167,14 @@ def main(argv: list[str] | None = None) -> None:
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     cfg = load_config()
+    from .trading.store import install_redaction
+    install_redaction()
+    tc = cfg.get("trading", {}) or {}
+    if tc.get("enabled", True) and tc.get("mode", "paper") == "live":
+        from .trading.live_gate import check_live_gates
+        cfg["_live_confirmed"] = check_live_gates(
+            cfg, str(resolve_path(cfg, cfg.get("db_path", "data/signals.db"))))
+        print("\n  *** LIVE TRADING ENABLED - real orders will be placed ***\n", flush=True)
     sc = cfg.get("server", {})
     host = sc.get("host", "127.0.0.1")
     port = int(args.port or sc.get("port", 8000))
