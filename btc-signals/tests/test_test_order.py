@@ -37,7 +37,13 @@ class FakeExchange:
             return httpx.Response(200, json={"orders": [] if self.never else
                                              [{k: v for k, v in o.items() if not k.startswith("_")}
                                               for o in self.orders.values() if o["state"] == "ORDER_STATE_NEW"]})
+        if p == "/v1/order/preview":
+            return httpx.Response(200, json={"order": {"state": "ORDER_STATE_NEW", "price": body["request"]["price"]}})
         if p == "/v1/orders" and req.method == "POST":
+            if body["tif"] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL":
+                assert body["synchronousExecution"] is True and body["maxBlockTime"] == "5"
+            else:
+                assert "synchronousExecution" not in body
             self.n += 1
             oid = f"o{self.n}"
             px, q = float(body["price"]["value"]), float(body["quantity"])

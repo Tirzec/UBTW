@@ -222,6 +222,14 @@ async def part2(broker, gw, w, qty: float, rep: Report, store=None, input_fn=inp
     if qty * limit + fee_usdc(qty, limit, sched) > max_cost:
         raise Abort("price moved above the cost cap; nothing was bought")
     print(f"ask now {ask_now}; buying with limit {limit}", flush=True)
+    try:
+        pv = await broker.preview(token=token, side="BUY", price=limit, size=qty, post_only=False)
+        keep = ("state", "price", "quantity", "cumQuantity", "leavesQuantity", "avgPx", "rejectReason",
+                "text", "commissionNotionalTotalCollected")
+        print("exchange preview (nothing placed): " +
+              (", ".join(f"{k}={pv[k]}" for k in keep if k in pv) or str(pv)[:300]), flush=True)
+    except Exception as e:  # noqa: BLE001 - the preview is diagnostic only
+        print(f"exchange preview unavailable: {e}", flush=True)
     ask = ask_now
     buy = await broker.place_limit(token=token, side="BUY", price=limit, size=qty, post_only=False)
     buy = await settle(broker, buy)
@@ -236,7 +244,8 @@ async def part2(broker, gw, w, qty: float, rep: Report, store=None, input_fn=inp
                          f"(status {buy.status}, filled {buy.filled:g}). Check the Polymarket app")
         return {}
     if not buy.filled:
-        raw = await order_diagnostics(broker, buy.order_id)
+        ex = (getattr(broker, "last_create", {}) or {}).get("executions")
+        raw = await order_diagnostics(broker, buy.order_id) + (f", executions={ex}" if ex is not None else "")
         _, a2 = await get_book(gw, w.slug)
         rep.step("WARN", f"buy did not fill; nothing to sell, no money spent. Exchange says: {raw}. "
                          f"Ask right after: {a2[0][0] if a2 else 'none'} (our limit {limit})")

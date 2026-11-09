@@ -72,12 +72,18 @@ def order_body(token: str, side: str, price: float, size: float, post_only: bool
     second live order behind."""
     slug, leg = split_token(token)
     long_px = price if leg == "long" else 1.0 - price
-    return {"marketSlug": slug, "type": "ORDER_TYPE_LIMIT",
+    body = {"marketSlug": slug, "type": "ORDER_TYPE_LIMIT",
             "price": {"value": format_price(long_px, tick), "currency": "USD"},
             "quantity": round(size, 2),
             "tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL" if post_only else "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
             "intent": INTENTS[(leg, side)], "participateDontInitiate": bool(post_only),
             "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
+    if not post_only:
+        # docs (orders overview, best practices): use synchronousExecution only for
+        # immediately-fillable orders, to wait for the fill confirmation; resting orders stay async
+        body["synchronousExecution"] = True
+        body["maxBlockTime"] = "5"
+    return body
 
 
 def _amt(x) -> float | None:
@@ -123,7 +129,8 @@ class UsLiveBroker:
         self.signer = Signer(key_id, secret)
         self.fee_schedule_for = fee_schedule_for
         self.tick_for = tick_for or (lambda token: 0.01)
-        self.client = client or httpx.AsyncClient(timeout=10)
+        self.client = client or httpx.AsyncClient(timeout=15)     # > maxBlockTime of sync orders
+        self.last_create: dict = {}
         self.base = base
         self.orders: dict[str, OrderState] = {}
         # Orders are created asynchronously: right after POST /v1/orders, GET /v1/order/{id} can
@@ -162,11 +169,21 @@ class UsLiveBroker:
                 self.orders[o.order_id] = o
                 return o
             raise
+        self.last_create = d if isinstance(d, dict) else {}
         o.order_id = str(d.get("id") or d.get("orderId") or "")
         if not o.order_id:
             raise BrokerError(f"no order id in response: {d}")
         self.orders[o.order_id] = o
         return await self.wait_visible(o.order_id, 3.0)
+
+    async def preview(self, *, token: str, side: str, price: float, size: float, post_only: bool) -> dict:
+        """POST /v1/order/preview: the exchange validates the order and shows expected values.
+        Places nothing."""
+        body = order_body(token, side, price, size, post_only, self.tick_for(token))
+        body.pop("synchronousExecution", None)
+        body.pop("maxBlockTime", None)
+        d = await self._req("POST", "/v1/order/preview", {"request": body})
+        return d.get("order") or d
 
     async def wait_visible(self, order_id: str, timeout: float) -> OrderState:
         """Poll until the exchange shows the order (or it is finished), up to `timeout` s."""
