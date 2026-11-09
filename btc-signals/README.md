@@ -383,11 +383,24 @@ window, so the calibration chart covers windows that didn't trade too.
 
 ### Validation status
 
-First run, 2026-11-09: 1 day of data (288 × 5m + 96 × 15m windows), untrained TWAP-aware prior,
-$50 stake, 1¢ half-spread, 2s latency.
+Backtest, 2026-11-09: 1 day of polymarket.com data (288 × 5m + 96 × 15m windows), untrained
+TWAP-aware prior, $50 stake, 1¢ half-spread, 2s latency, **after the volatility fix**
+(volatility from 60-second returns; 1-second returns understated it about 6×).
 
 | Sample | Model Brier | Market Brier | Following exit rules | Holding to resolution |
 |---|---|---|---|---|
+| All 385 windows | 0.1371 | 0.1406 | 365 trades, **+5.7%/$** (t = 1.8) | +12.6%/$ (t = 1.7) |
+| Last 30% (out of sample) | 0.1241 | 0.1294 | 112 trades, +9.1%/$ (t = 1.1) | +2.7%/$ (t = 0.2) |
+
+Before the fix the prior was overconfident: when it said 15%, UP happened 26% of the time, and
+holding lost 7%/$. Now its predictions match reality across the range (15% → 9%, 85% → 87%).
+
+Read this as **promising but unproven**:
+- One day, a different exchange, and no result is statistically significant.
+- Polymarket US has higher taker fees (0.095 vs 0.07).
+- Judge on the paper trades (300+) on the exchange you'll actually use.
+
+---|---|---|---|---|
 | All 385 windows | 0.1372 | 0.1406 | 367 trades, 58.6% win, **+1.7%/$** (t = 1.1), max DD $228 | −7.0%/$ (t = −1.5) |
 | Last 30% (out of sample) | 0.1227 | 0.1294 | 107 trades, **+2.0%/$** (t = 0.7) | −23%/$ (t = −3.2) |
 | 15m only, all | | | 93 trades, 67.7% win, +4.0%/$ (t = 1.6) | |
