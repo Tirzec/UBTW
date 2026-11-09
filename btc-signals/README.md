@@ -31,14 +31,14 @@ Any market that differs (other lookback, other source, other comparator, TWAP di
 
 ## Setup
 
-Requires Python 3.11+.
+Requires Python 3.9+ (the version built into macOS works).
 
 ```bash
 cd btc-signals
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env            # optional: Polymarket API keys for the PolyBolt feed
-python -m pytest                # 75 tests, about 1 s
+python -m pytest                # 77 tests, about 1 s
 python -m app.main              # open http://127.0.0.1:8000
 ```
 
@@ -294,7 +294,7 @@ app/engine.py    live loop           app/paper.py   paper trader + stats   app/d
 app/main.py      FastAPI + websocket web/           dashboard (plain HTML/JS)
 app/notify.py    phone push alerts (ntfy / Telegram)
 backtest/        collect / replay / train / report
-tests/           75 tests: features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
+tests/           77 tests: features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
                  parsers and staleness, degraded-data end-to-end, books, model, backtester
 docs/ARCHITECTURE.md   research notes and design
 ```

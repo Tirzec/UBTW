@@ -17,13 +17,16 @@ from .base import PriceFeed, PriceTick
 
 
 def parse_iso(ts: str) -> float:
-    """ISO-8601 -> unix seconds; tolerates nanosecond fractions and 'Z'."""
+    """ISO-8601 -> unix seconds. Handles 'Z', nanosecond fractions and short fractions,
+    and works on Python 3.9 (whose fromisoformat needs exactly 6 fraction digits)."""
     ts = ts.strip().replace("Z", "+00:00")
     if "." in ts:
         head, rest = ts.split(".", 1)
-        frac = "".join(ch for ch in rest if ch.isdigit())
-        tz = rest[len(frac):]
-        ts = f"{head}.{frac[:6]}{tz}"
+        n = 0
+        while n < len(rest) and rest[n].isdigit():
+            n += 1
+        frac, tz = rest[:n], rest[n:]
+        ts = f"{head}.{(frac + '000000')[:6]}{tz}"
     return datetime.fromisoformat(ts).timestamp()
 
 

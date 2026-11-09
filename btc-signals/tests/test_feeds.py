@@ -75,6 +75,15 @@ def test_polybolt_requires_credentials_and_parses():
     assert t.kind == "twap" and t.price == pytest.approx(78803.7152)
 
 
+def test_parse_iso_variants():
+    base = parse_iso("2026-11-09T14:01:35.673911+00:00")
+    assert parse_iso("2026-11-09T14:01:35.673911580Z") == pytest.approx(base)
+    assert parse_iso("2026-11-09T14:01:35.673911Z") == pytest.approx(base)
+    assert parse_iso("2026-11-09T14:01:35.6739Z") == pytest.approx(base - 0.000011)
+    assert parse_iso("2026-11-09T14:01:35Z") == pytest.approx(base - 0.673911)
+    assert parse_iso("2026-11-09T09:01:35.5-05:00") == pytest.approx(base - 0.173911)
+
+
 def test_registry_and_unknown_type():
     assert {"polymarket_rtds", "polybolt", "coinbase", "kraken", "binance"} <= set(FEED_TYPES)
     with pytest.raises(ValueError):

@@ -19,7 +19,7 @@ log = logging.getLogger("feeds")
 TickKind = Literal["trade", "spot", "twap"]
 
 
-@dataclass(slots=True)
+@dataclass
 class PriceTick:
     source: str            # feed name, e.g. "coinbase", "polymarket_rtds"
     kind: TickKind         # trade (exchange print), spot (oracle price), twap (oracle TWAP)

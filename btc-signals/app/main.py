@@ -7,6 +7,7 @@ import logging
 import math
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -18,6 +19,15 @@ from .engine import Engine
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 log = logging.getLogger("app")
+
+
+class PositionIn(BaseModel):
+    """Must live at module level: FastAPI can't resolve a locally defined body model."""
+    duration: str = Field(pattern="^(5m|15m)$")
+    side: str = Field(pattern="^(?i:up|down)$")
+    entry_price: float = Field(gt=0, lt=1)
+    shares: float = Field(gt=0)
+    slug: Optional[str] = None  # Optional[] (not `str | None`) keeps Python 3.9 working
 
 
 def _clean(o):
@@ -66,13 +76,6 @@ def create_app(cfg: dict | None = None, start_engine: bool = True) -> FastAPI:
     async def paper(limit: int = 100):
         return app.state.engine.db.query("SELECT * FROM paper_trades ORDER BY id DESC LIMIT ?",
                                          (limit,))
-
-    class PositionIn(BaseModel):
-        duration: str = Field(pattern="^(5m|15m)$")
-        side: str = Field(pattern="^(?i:up|down)$")
-        entry_price: float = Field(gt=0, lt=1)
-        shares: float = Field(gt=0)
-        slug: str | None = None
 
     @app.post("/api/positions")
     async def add_position(p: PositionIn):
