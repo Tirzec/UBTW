@@ -80,7 +80,7 @@ class SportsModule(StrategyModule):
         self.pinnacle: dict = {}                            # (event_slug, bet_type) -> (ts, ok, detail)
         self.settled: dict[str, float] = {}
         self.errors: dict[str, str] = {}
-        self._gw_sem = asyncio.Semaphore(int(self.sc.get("gateway_concurrency", 4)))
+        self._gw_sem_obj = None             # created on first use: Python 3.9 binds it to a loop
         self._tasks: list[asyncio.Task] = []
         self._state: dict = {}
         self._last_settle_poll: dict = {}
@@ -131,6 +131,12 @@ class SportsModule(StrategyModule):
             raise
         except Exception:
             log.exception("sports task %s crashed", name)
+
+    @property
+    def _gw_sem(self) -> asyncio.Semaphore:
+        if self._gw_sem_obj is None:
+            self._gw_sem_obj = asyncio.Semaphore(int(self.sc.get("gateway_concurrency", 4)))
+        return self._gw_sem_obj
 
     async def _gw(self, path: str, params: Optional[dict] = None):
         async with self._gw_sem:

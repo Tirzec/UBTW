@@ -225,9 +225,15 @@ class OddsSource:
         self.budget = Budget(self.name, store, conf.get("budget", {}))
         self.key = os.environ.get(conf.get("key_env", ""), "").strip()
         self.last_error = ""
-        self._lock = asyncio.Lock()
+        self._lock_obj = None               # created on first use: Python 3.9 binds it to a loop
         self._last_call = 0.0
         self.min_interval_s = float(conf.get("min_interval_s", 1.0))
+
+    @property
+    def _lock(self) -> asyncio.Lock:
+        if self._lock_obj is None:
+            self._lock_obj = asyncio.Lock()
+        return self._lock_obj
 
     @property
     def available(self) -> bool:
