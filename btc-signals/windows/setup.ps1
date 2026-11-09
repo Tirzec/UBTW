@@ -6,9 +6,11 @@ $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-# Find Python 3.9+ (prefer the "py" launcher that the python.org installer adds)
+# Find Python 3.9+ (prefer the "py" launcher that the python.org installer adds).
+# Tested versions (3.13 / 3.12) come first: the newest Python may not have ready-made
+# packages (wheels) for every dependency yet.
 $exe = $null; $extra = @(); $v = $null
-foreach ($cand in "py -3", "python") {
+foreach ($cand in "py -3.13", "py -3.12", "py -3", "python") {
     $parts = $cand -split " "
     if (-not (Get-Command $parts[0] -ErrorAction SilentlyContinue)) { continue }
     $args2 = @($parts | Select-Object -Skip 1)
