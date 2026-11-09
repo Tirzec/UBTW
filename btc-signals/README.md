@@ -155,6 +155,13 @@ Known limitations on Polymarket US:
   Partial fills keep the filled part; immediate orders never rest; 429 rate limits pause briefly.
 - `python -m app.trader reconcile` runs the comparison by hand (read-only).
 
+**Monitoring (free: ntfy or Telegram, set in `.env`).** In LIVE mode these always reach your phone:
+every fill (buy and sell, with fee), daily loss limit / phase trade cap reached, reconciliation
+mismatch, kill switch, errors (API errors, crashed background tasks). A **daily summary** is pushed
+at `notifications.daily_summary_at` (default 23:55): trades, P&L after fees, win rate, average win vs
+loss, fees, and CLV for sports. Any day, any time: `python -m app.trader summary [--live] [--date ...] [--send]`
+(Windows: `.\windows\summary.bat`).
+
 7. In `config.yaml` set `trading.mode: live` and `trading.live_trading_enabled: true`, then start
    the app. It checks that your key works (shows your buying power), prints your paper stats and
    risk limits, and asks you to type `I UNDERSTAND THIS TRADES REAL MONEY`.

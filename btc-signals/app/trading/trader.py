@@ -90,6 +90,7 @@ class AutoTrader:
         self.last_close: dict[str, float] = {}
         self.status_note = ""
         self.last_balance: float | None = None
+        self._limit_alerted: set = set()
         self._last_balance_check = 0.0
         self._last_hb = 0.0
         self._task: asyncio.Task | None = None
@@ -148,6 +149,8 @@ class AutoTrader:
 
     def _api_error(self, where: str, e: Exception) -> None:
         self.store.event("api_error", f"{where}: {e}", "ERROR")
+        if self.mode == "live":
+            self._alert(f"Error: {where}", str(e)[:300], "warn", "error")
         reason = self.risk.record_api_error(time.time())
         if reason:
             self._hard_pause(reason)
@@ -278,7 +281,14 @@ class AutoTrader:
                                             degraded=self.module.degraded())
         blockers += self.module.entry_blockers(sig, active, now)
         if self.global_risk is not None:
-            blockers += self.global_risk.entry_blockers(now, stake)
+            gb = self.global_risk.entry_blockers(now, stake)
+            for b in gb:                         # combined loss limit / phase trade cap: tell the phone once a day
+                if b.startswith(("combined daily loss", "live phase 1")):
+                    key = f"{local_day(now)}:{b.split(':')[0][:40]}"
+                    if key not in self._limit_alerted:
+                        self._limit_alerted.add(key)
+                        self._alert("Daily limit reached - no more entries today", b, "warn", "risk")
+            blockers += gb
         if blockers:
             self.status_note = f"{sig.label} {sig.side} signal skipped: {blockers[0]}"
             return
@@ -418,6 +428,10 @@ class AutoTrader:
         if o.filled:
             self.store.event("fill", f"SOLD {p['side']} {o.filled:.2f} @ {o.avg_price:.3f} fee {o.fee:.4f}",
                              position=p["id"], order=o.order_id)
+            left = p["shares"] - sold
+            rest = "all sold" if left <= 1e-6 else f"{left:g} left"
+            self._alert(f"Sold {p['duration']} {p['side']} {o.filled:g} @ {o.avg_price:.2f}",
+                        f"fee ${o.fee:.2f}, {rest} ({p.get('exit_reason') or ''})")
         if sold >= p["shares"] - 1e-6:          # exact: a leftover 0.01 contract is still a position
             self._close(self.store.position(p["id"]), payout=0.0, now=now)
         else:

@@ -18,10 +18,12 @@ import httpx
 log = logging.getLogger("notify")
 
 PRIORITY = {"signal": 4, "exit": 4, "degraded": 3, "settled": 2, "rules": 4, "test": 3,
-            "trade": 3, "risk": 5}
+            "trade": 3, "risk": 5, "error": 4, "summary": 3}
 TAGS = {"signal": "chart_with_upwards_trend", "exit": "rotating_light", "degraded": "warning",
         "settled": "checkered_flag", "rules": "no_entry", "test": "white_check_mark",
-        "trade": "moneybag", "risk": "octagonal_sign"}
+        "trade": "moneybag", "risk": "octagonal_sign", "error": "x", "summary": "bar_chart"}
+# In LIVE mode these always reach your phone, whatever notifications.kinds says.
+LIVE_REQUIRED_KINDS = {"trade", "risk", "error", "summary"}
 
 
 class Notifier:

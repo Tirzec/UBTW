@@ -110,6 +110,8 @@ class Engine:
             from .trading.live_phase import apply_phase1
             self.live_phase = apply_phase1(cfg)          # hard phase-1 caps, before any trader exists
             log.warning("LIVE phase 1 limits in force: %s", self.live_phase)
+            from .notify import LIVE_REQUIRED_KINDS
+            self.notifier.kinds |= LIVE_REQUIRED_KINDS   # fills, limits, mismatches, kill, errors, summary
         if self.trading_enabled:
             from .trading.store import TradeStore, setup_trade_log
             setup_trade_log(resolve_path(cfg, tc.get("log_file", "data/trader.log")))
@@ -183,6 +185,26 @@ class Engine:
         if self.reconciler is not None:
             self._tasks.append(asyncio.create_task(self._guard("reconcile", self.reconciler.run()),
                                                    name="reconcile"))
+        self._tasks.append(asyncio.create_task(self._guard("daily-summary", self._summary_loop()),
+                                               name="daily-summary"))
+
+    def daily_summary(self, date: str | None = None, now: float | None = None) -> tuple[str, str]:
+        from .trading.summary import build_summary, format_summary
+        return format_summary(build_summary(self.db, mode=self.trade_mode, venue=self.venue, date=date, now=now))
+
+    async def _summary_loop(self) -> None:
+        """Once a day at notifications.daily_summary_at (local time, default 23:55): push the summary."""
+        at = str((self.cfg.get("notifications", {}) or {}).get("daily_summary_at", "23:55"))
+        hh, mm = (int(x) for x in at.split(":"))
+        while True:
+            now = time.time()
+            lt = time.localtime(now)
+            day = time.strftime("%Y-%m-%d", lt)
+            if (lt.tm_hour, lt.tm_min) >= (hh, mm) and self.trade_store.get_state("summary_sent") != day:
+                title, body = self.daily_summary(now=now)
+                self.alert("summary", title, body, "info")
+                self.trade_store.set_state("summary_sent", day)
+            await asyncio.sleep(30)
 
     def _bot_open_orders(self) -> dict:
         """{order id: market slug} of every order any trader currently holds open."""
@@ -252,8 +274,9 @@ class Engine:
             await coro
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as e:  # noqa: BLE001
             log.exception("task %s crashed", name)
+            self.alert("error", f"Background task '{name}' crashed", f"{type(e).__name__}: {e}"[:300], "warn")
 
     async def stop(self) -> None:
         for t in getattr(self, "traders", {}).values():

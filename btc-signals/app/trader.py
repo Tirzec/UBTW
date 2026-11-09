@@ -7,6 +7,7 @@
   python -m app.trader stats     # paper + live results
   python -m app.trader fills     # your latest real fills on Polymarket US (price, size, taker/maker)
   python -m app.trader reconcile # compare the bot's records with the exchange now (read-only)
+  python -m app.trader summary [--date YYYY-MM-DD] [--live] [--send]   # daily summary (paper by default)
 """
 from __future__ import annotations
 
@@ -113,7 +114,10 @@ async def _account_report(cfg: dict, what: str, c) -> str:
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.trader")
-    ap.add_argument("command", choices=["stop", "resume", "status", "stats", "fills", "reconcile"])
+    ap.add_argument("command", choices=["stop", "resume", "status", "stats", "fills", "reconcile", "summary"])
+    ap.add_argument("--date", help="summary: day (YYYY-MM-DD), default today")
+    ap.add_argument("--live", action="store_true", help="summary: live trades instead of paper")
+    ap.add_argument("--send", action="store_true", help="summary: also push it to your phone")
     ap.add_argument("--reason", default="STOP from command line")
     ap.add_argument("--wait", action="store_true", help="stop: wait until the running bot confirms the halt")
     a = ap.parse_args(argv)
@@ -140,6 +144,23 @@ def main(argv=None) -> None:
         _set(c, "kill_requested", None)
         _set(c, "resume_requested", time.time())
         print("Resume requested: the running bot resumes within ~1 second.")
+    elif a.command == "summary":
+        from .db import DB
+        from .trading.summary import build_summary, format_summary
+        db = DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db")))
+        title, body = format_summary(build_summary(db, mode="live" if a.live else "paper",
+                                                   venue=cfg.get("venue", "polymarket_us"), date=a.date))
+        print(title + "\n" + body)
+        if a.send:
+            from .notify import Notifier
+
+            async def _send():
+                n = Notifier(cfg)
+                n.kinds.add("summary")
+                ok = await n.send({"kind": "summary", "title": title, "body": body}) if n.channels else False
+                await n.client.aclose()
+                return ok
+            print("sent to your phone" if asyncio.run(_send()) else "not sent (no ntfy/Telegram set in .env?)")
     elif a.command in ("fills", "reconcile"):
         print(asyncio.run(_account_report(cfg, a.command, c)))
     elif a.command == "status":

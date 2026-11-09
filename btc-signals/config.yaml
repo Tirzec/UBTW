@@ -215,7 +215,9 @@ notifications:
   ntfy_server: https://ntfy.sh
   # which alerts to push: signal (new trade signal), exit (SELL/HOLD change on your positions),
   # degraded (data went bad / recovered), rules (market rules changed), settled (window results)
-  kinds: [signal, exit, degraded, rules, trade, risk]
+  kinds: [signal, exit, degraded, rules, trade, risk, error, summary]
+  # in LIVE mode trade (every fill), risk (limits, mismatch, kill switch), error and summary are always on
+  daily_summary_at: "23:55"        # local time: trades, P&L after fees, win rate, avg win/loss, sports CLV
   min_interval_s: 2
   click_url: ""                    # optional: link opened when you tap the notification
 

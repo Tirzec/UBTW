@@ -31,7 +31,7 @@ class OrderState:
     notional: float = 0.0     # sum(fill price * shares)
     fee: float = 0.0
     error: str = ""
-    created: float = field(default_factory=time.time)
+    created: float = field(default_factory=lambda: time.time())   # looked up per call (testable clock)
 
     @property
     def avg_price(self) -> float:
