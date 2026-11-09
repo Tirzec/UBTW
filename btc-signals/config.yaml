@@ -161,7 +161,7 @@ trading:
   mode: paper                      # paper | live
   live_trading_enabled: false      # second, explicit switch for live
   min_paper_trades_for_live: 300
-  paper_count_from: "2026-11-09T21:25:00Z"   # entry/exit fix: only paper trades opened after this count
+  paper_count_from: "2026-11-09T22:28:00Z"   # after the order-book cache fix: only paper trades opened after this count
   live_phase: 1                    # first live phase: hard caps in app/trading/live_phase.py
                                    # ($1 stake, $10/day loss, 10 live trades/day; config can only lower them)
   live_phase1:

@@ -227,3 +227,29 @@ def test_sports_paper_trades_do_not_count_toward_crypto_gate(tmp_path):
                                    "exit_fee": 0, "closed_ts": i, "venue": "polymarket_us", "module": "sports"})
     assert paper_record(str(db), "polymarket_us")[0] == 0
     assert paper_record(str(db), "polymarket_us", "sports")[0] == 250
+
+
+def test_gateway_requests_bypass_the_30s_cache_and_book_age_uses_exchange_time():
+    """The public gateway sends cache-control: max-age=30 via Cloudflare; a plain GET returned a
+    book 29 s old during the step-4 test. Every book/market poll must carry a unique parameter,
+    and staleness is measured from the exchange's transactTime."""
+    import asyncio
+    import httpx
+    from app.ingest.us_markets import UsBookPoller, book_time, nocache
+    a, b = nocache(), nocache({"x": 1})
+    assert a["_"] != b["_"] and b["x"] == 1
+    seen = []
+
+    def h(req):
+        seen.append(dict(req.url.params))
+        return httpx.Response(200, json={"marketData": {"bids": [], "offers": [],
+                                                        "transactTime": "2026-11-09T22:26:03.586834969Z"}})
+    p = UsBookPoller({}, client=httpx.AsyncClient(transport=httpx.MockTransport(h)))
+    asyncio.run(p.poll_slug("s"))
+    asyncio.run(p.poll_slug("s"))
+    assert len({d["_"] for d in seen}) == 2
+    t = book_time({"marketData": {"transactTime": "2026-11-09T22:26:03.586834969Z"}}, now=2e9)
+    assert abs(t - 1794263163.586834) < 1e-3
+    assert book_time({}, now=5.0) == 5.0
+    assert book_time({"transactTime": "2099-01-01T00:00:00Z"}, now=5.0) == 5.0      # never in the future
+    assert p.store.get("s:long") is None or p.store.get("s:long")["updated"] <= 2e9

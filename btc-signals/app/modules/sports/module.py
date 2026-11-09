@@ -251,7 +251,8 @@ class SportsModule(StrategyModule):
         return s
 
     async def poll_book(self, slug: str) -> None:
-        d = await self._gw(f"/v1/markets/{slug}/book")
+        from ...ingest.us_markets import nocache
+        d = await self._gw(f"/v1/markets/{slug}/book", nocache())
         if d:
             us_book_to_store(self.books, slug, d, time.time(), self._last_shares)
 

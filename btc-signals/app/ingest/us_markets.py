@@ -128,7 +128,7 @@ class UsDiscovery(Discovery):
         return w
 
     async def refresh(self, w: Window) -> None:
-        r = await self.client.get(f"{self.gateway}/v1/market/slug/{w.slug}")
+        r = await self.client.get(f"{self.gateway}/v1/market/slug/{w.slug}", params=nocache())
         w.last_fetch = time.time()
         if r.status_code == 404:
             return
@@ -138,9 +138,30 @@ class UsDiscovery(Discovery):
             apply_us_market(w, m, None if self.theta_override in (None, "") else float(self.theta_override))
 
 
+def nocache(params: dict | None = None) -> dict:
+    """The public gateway is behind Cloudflare with `cache-control: public, max-age=30`: a plain
+    GET can return a book up to 30 s old. A unique query parameter forces a fresh response."""
+    return {**(params or {}), "_": str(time.time_ns())}
+
+
+def book_time(data: dict, now: float) -> float:
+    """When the exchange produced this book (`transactTime`), never later than `now`.
+    Staleness checks then measure the exchange's age of the data, not when we received it."""
+    md = data.get("marketData") or data
+    t = md.get("transactTime")
+    if not t:
+        return now
+    try:
+        from datetime import datetime
+        return min(now, datetime.fromisoformat(str(t)[:26].rstrip("Z") + "+00:00").timestamp())
+    except ValueError:
+        return now
+
+
 def us_book_to_store(store: BookStore, slug: str, data: dict, now: float, last_shares: dict) -> None:
     """Write a /book response into the long (Up) and derived short (Down) books (pure)."""
     md = data.get("marketData") or data
+    now = book_time(data, now)
     bids = [(_amount(x.get("px")), float(x.get("qty") or 0)) for x in md.get("bids") or []]
     offers = [(_amount(x.get("px")), float(x.get("qty") or 0)) for x in md.get("offers") or []]
     bids = [(p, q) for p, q in bids if p is not None and q > 0]
@@ -186,7 +207,7 @@ class UsBookPoller:
         self._slugs = {a.rsplit(":", 1)[0] for a in assets if a}
 
     async def poll_slug(self, slug: str) -> None:
-        r = await self.client.get(f"{self.gateway}/v1/markets/{slug}/book")
+        r = await self.client.get(f"{self.gateway}/v1/markets/{slug}/book", params=nocache())
         if r.status_code == 404:
             return
         r.raise_for_status()

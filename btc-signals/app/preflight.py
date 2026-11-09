@@ -216,7 +216,8 @@ def check_account(cfg: dict, expect_balance: float | None, account: Account | No
 
 
 def _book(client: httpx.Client, gateway: str, slug: str):
-    r = client.get(f"{gateway}/v1/markets/{slug}/book")
+    from .ingest.us_markets import nocache
+    r = client.get(f"{gateway}/v1/markets/{slug}/book", params=nocache())
     if r.status_code == 404:
         return None
     r.raise_for_status()

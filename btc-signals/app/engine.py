@@ -29,7 +29,7 @@ from .signal import Decision, decide
 log = logging.getLogger("engine")
 
 WARMUP_SECONDS = 120
-BOOK_STALE_S = 15
+BOOK_STALE_S = 5          # seconds, measured from the exchange's own book timestamp (transactTime)
 
 
 @dataclass
