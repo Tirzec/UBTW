@@ -180,3 +180,18 @@ def test_broker_waits_for_async_order_then_gives_up(monkeypatch):
     o.created = T.time.time() - 11                                # 11 s later, still never seen
     o = asyncio.run(broker.poll(o.order_id))
     assert o.status == "rejected" and "never appeared" in o.error
+
+
+def test_missing_book_tries_other_market_then_stops_cleanly(monkeypatch):
+    """A new window's /book answers 404 for a while: skip it, never crash, place nothing."""
+    calls = []
+
+    def gw(req):
+        calls.append(req.url.path)
+        if req.url.path.endswith("/book"):
+            return httpx.Response(404, json={"code": 5, "message": "not found"})
+        return FakeExchange().gateway(req)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(gw))
+    with pytest.raises(T.Abort, match="not two-sided"):
+        asyncio.run(T.pick_market(client, {}, "15m", now=NOW_FIXED))
+    assert sum(p.endswith("/book") for p in calls) == 2          # tried 15m, then 5m

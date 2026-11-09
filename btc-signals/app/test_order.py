@@ -55,6 +55,8 @@ def _parse_book(data: dict):
 
 async def get_book(gw: httpx.AsyncClient, slug: str):
     r = await gw.get(f"{GATEWAY}/v1/markets/{slug}/book")
+    if r.status_code == 404:              # a brand-new window's book isn't created yet
+        return [], []
     r.raise_for_status()
     return _parse_book(r.json())
 
