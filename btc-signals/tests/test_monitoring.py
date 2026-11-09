@@ -44,3 +44,12 @@ def test_live_alert_kinds_cannot_be_turned_off(monkeypatch):
     n.kinds |= LIVE_REQUIRED_KINDS                         # what the engine does in LIVE mode
     for k in ("trade", "risk", "error", "summary"):
         assert n.wants({"kind": k, "title": k})
+
+
+def test_raising_daily_limit_lifts_todays_stop():
+    from app.trading.risk import RiskManager, RiskState
+    st = RiskState(day=time.strftime("%Y-%m-%d"), day_pnl=-1.21, day_stopped_until=time.time() + 3600)
+    rm = RiskManager({"daily_loss_limit_usd": 5}, st)
+    assert st.day_pnl > -rm.daily_loss_limit          # what AutoTrader._recompute_day checks on startup
+    rm2 = RiskManager({"daily_loss_limit_usd": 1}, RiskState(day_pnl=-1.21, day_stopped_until=time.time() + 3600))
+    assert not rm2.state.day_pnl > -rm2.daily_loss_limit   # old limit: stays stopped

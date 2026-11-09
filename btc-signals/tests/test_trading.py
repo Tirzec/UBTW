@@ -435,3 +435,26 @@ def test_env_files_are_gitignored():
     from pathlib import Path
     gi = (Path(__file__).resolve().parent.parent / ".gitignore").read_text(encoding="utf-8")
     assert ".env" in gi.splitlines() and "*.pem" in gi
+
+
+def test_raised_daily_limit_lifts_todays_stop_on_restart(tmp_path):
+    """Stopped under a $1 limit with -$1.21 today; restarted with $5 -> trading allowed again.
+    Restarted with the same limit -> stays stopped."""
+    import copy
+    e, t = make(tmp_path)
+    now = time.time()
+    t.store.db.insert("bot_positions", {"mode": "paper", "status": "closed", "pnl": -1.21, "cost": 1,
+                                        "entry_fee": 0, "exit_fee": 0, "opened_ts": now - 60, "closed_ts": now - 30,
+                                        "venue": "polymarket_intl", "module": "crypto_updown"})
+    t.risk.state.day_stopped_until = now + 3600
+    t._save()
+    same = copy.deepcopy(TC)
+    same["trading"]["risk"] = {**R, "daily_loss_limit_usd": 1}
+    t1 = AutoTrader(e, same, PaperBroker(e.clob.store.get, e.clob.store.trades_since, lambda x: SCHED), t.store)
+    assert t1.risk.state.day_stopped_until > now
+    raised = copy.deepcopy(TC)
+    raised["trading"]["risk"] = {**R, "daily_loss_limit_usd": 5}
+    t2 = AutoTrader(e, raised, PaperBroker(e.clob.store.get, e.clob.store.trades_since, lambda x: SCHED), t.store)
+    assert t2.risk.state.day_stopped_until == 0.0
+    assert not any("daily loss" in b for b in t2.risk.entry_blockers(now=now, stake=1, open_exposure=0,
+                                                                     window_busy=False, degraded=False))

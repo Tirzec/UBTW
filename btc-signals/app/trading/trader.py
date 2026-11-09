@@ -107,6 +107,12 @@ class AutoTrader:
         rows = self.store.closed_positions(since=day_start)
         self.risk.state.day_pnl = sum(r["pnl"] or 0 for r in rows)
         self.risk.state.day_trades = len(rows)
+        st = self.risk.state
+        if st.day_stopped_until and st.day_pnl > -self.risk.daily_loss_limit:
+            # the daily limit was raised since the stop: today's loss is now inside it, so lift the stop
+            st.day_stopped_until = 0.0
+            self.store.event("risk", f"daily stop lifted: today {st.day_pnl:+.2f} is within the new limit "
+                                     f"-{self.risk.daily_loss_limit:g}", "WARNING")
 
     def _save(self) -> None:
         self.store.set_state(self.risk_key, {k: v for k, v in self.risk.state.__dict__.items()
