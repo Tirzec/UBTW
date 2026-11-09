@@ -201,10 +201,28 @@ window, so the calibration chart covers windows that didn't trade too.
 
 ### Validation status
 
-First run, 2026-11-09, 1 day of 5m windows, out of sample on the last 81 windows:
+First run, 2026-11-09: 1 day of data (288 × 5m + 96 × 15m windows), untrained TWAP-aware prior,
+$50 stake, 1¢ half-spread, 2s latency.
 
-| | Brier (lower is better) | Following exit rules | Holding to resolution |
-|---|---|---|---|
+| Sample | Model Brier | Market Brier | Following exit rules | Holding to resolution |
+|---|---|---|---|---|
+| All 385 windows | 0.1372 | 0.1406 | 367 trades, 58.6% win, **+1.7%/$** (t = 1.1), max DD $228 | −7.0%/$ (t = −1.5) |
+| Last 30% (out of sample) | 0.1227 | 0.1294 | 107 trades, **+2.0%/$** (t = 0.7) | −23%/$ (t = −3.2) |
+| 15m only, all | | | 93 trades, 67.7% win, +4.0%/$ (t = 1.6) | |
+
+Read this as **no demonstrated edge yet**:
+- The model's probabilities score slightly better than the market mid, but the PnL is not
+  statistically significant on one day.
+- Holding to resolution loses. The exit rules (taking profit when the market catches up to fair
+  value) are what keep it near break-even.
+- The prior is overconfident in the tails, and it trades in almost every window. That's adverse
+  selection: where it disagrees with the market, the market is usually right.
+- `train` fitted logistic models for both durations. Neither beat the prior out of sample, so
+  neither was saved; the app runs on the prior.
+- Collect more days, rerun, and judge on the out-of-sample report and a few hundred paper-traded
+  windows. Consider raising `signal.buffer` if trades stay this frequent.
+
+---|---|---|---|
 | Market mid | 0.1376 | – | – |
 | Prior only | 0.1352 | +0.5%/$ (t = 0.13) | −31%/$ (t = −3.6) |
 | Trained LR | 0.1378 | +1.3%/$ (t = 0.22) | +15%/$ (t = 1.2) |
