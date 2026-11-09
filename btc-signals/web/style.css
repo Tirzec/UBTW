@@ -108,3 +108,15 @@ button.resume { background: var(--up); border-color: var(--up); color: #fff; fon
 #bot-risk { margin-top: 12px; }
 .pos { color: var(--up); } .neg { color: var(--down); }
 .trigger { font-size: 11px; color: var(--muted); }
+
+/* tabs */
+.tabs { display: flex; gap: 6px; margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.tab { background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px; color: var(--muted); }
+.tab.active { color: var(--text); border-color: var(--accent); background: var(--panel2); }
+.tabpane { display: grid; gap: 16px; }
+.board td { font-size: 12.5px; }
+.board .edge-pos { color: var(--up); font-weight: 700; }
+.board .edge-neg { color: var(--muted); }
+details.card-reasons summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+details.card-reasons ul { margin: 6px 0 0; padding-left: 16px; }
+.signal-row { background: rgba(46,160,67,.08); }

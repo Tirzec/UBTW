@@ -10,7 +10,7 @@
 <header class="top">
   <div class="brand">BTC Up/Down Signals <span class="muted" id="brand-sub"></span></div>
   <div class="prices">
-    <div><span class="label">Chainlink</span> <b id="ref-spot">–</b> <span id="ref-src" class="tag"></span></div>
+    <div><span class="label">Settlement index</span> <b id="ref-spot">–</b> <span id="ref-src" class="tag"></span></div>
     <div><span class="label">60s TWAP</span> <b id="ref-twap">–</b></div>
     <div><span class="label">Spot</span> <b id="spot">–</b></div>
     <div><span class="label">Gap</span> <b id="gap">–</b></div>
@@ -26,16 +26,48 @@
 <div id="banner-blackout" class="banner warn hidden"></div>
 
 <main>
-  <section class="card bot" id="bot">
+  <section class="card bot" id="bot-global">
     <div class="bot-head">
       <div id="bot-mode" class="mode-badge">–</div>
       <div class="bot-status"><div id="bot-status-line" class="bot-state">auto-trader starting…</div>
         <div id="bot-note" class="muted"></div></div>
       <div class="bot-buttons">
         <button id="bot-resume" class="resume hidden">Resume trading</button>
-        <button id="bot-stop" class="stop">STOP</button>
+        <button id="bot-stop" class="stop" title="Cancels all open orders and halts every module">STOP</button>
       </div>
     </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="crypto" role="tab">Crypto</button>
+      <button class="tab" data-tab="sports" role="tab">Sports</button>
+      <button class="tab" data-tab="combined" role="tab">Combined</button>
+    </nav>
+  </section>
+
+  <div id="tab-combined" class="tabpane hidden">
+    <section class="card"><h2>Combined P&amp;L (all modules)</h2><div id="combined"></div></section>
+  </div>
+
+  <div id="tab-sports" class="tabpane hidden">
+    <section class="card"><h2>Sports auto-trader <span id="sp-mode" class="tag"></span></h2>
+      <div id="sp-status" class="muted"></div>
+      <div id="sp-risk" class="stats"></div>
+      <h3>Open positions</h3><div id="sp-positions"></div>
+      <h3>Trade log</h3><div id="sp-trades"></div>
+      <p id="sp-paper" class="muted"></p>
+    </section>
+    <section class="card"><h2>Sports board: Polymarket price vs fair value</h2>
+      <div id="sp-sources" class="muted"></div>
+      <div id="sp-board"></div>
+    </section>
+    <section class="grid2">
+      <article class="card"><h2>P&amp;L and CLV by league</h2><div id="sp-by-league"></div></article>
+      <article class="card"><h2>P&amp;L and CLV by bet type</h2><div id="sp-by-bet"></div></article>
+    </section>
+  </div>
+
+  <div id="tab-crypto" class="tabpane">
+  <section class="card bot" id="bot">
+    <h2>Crypto auto-trader</h2>
     <div id="bot-risk" class="stats"></div>
     <h3>Open positions</h3><div id="bot-positions"></div>
     <h3>Trade log</h3><div id="bot-trades"></div>
@@ -79,6 +111,7 @@
   </section>
 
   <section class="card"><h2>Alerts</h2><div id="alerts"></div></section>
+  </div>
 </main>
 <script src="/static/app.js"></script>
 </body>

@@ -350,3 +350,23 @@ def test_sports_paper_trade_end_to_end_with_clv(tmp_path):
         p = store.position(p["id"])
         assert p["status"] == "closed" and p["pnl"] == pytest.approx(p["shares"] * 1.0 - p["cost"])
     asyncio.run(run())
+
+
+def test_sports_report_from_saved_data(tmp_path):
+    from backtest.sports_report import load, summarize, write_html
+    db = DB(tmp_path / "r.db")
+    db.conn.executescript(__import__("app.modules.sports.module", fromlist=["LINES_SCHEMA"]).LINES_SCHEMA)
+    TradeStore(db, "paper", "polymarket_us", "sports")
+    for i, (fair, out, mid) in enumerate([(0.7, 1.0, 0.68), (0.3, 0.0, 0.35), (0.6, 0.5, 0.6), (0.55, 1.0, 0.5)]):
+        db.execute("INSERT INTO sports_closing (market_slug,league,bet_type,closing_fair_long,pm_mid_at_close,settled_long) "
+                   "VALUES (?,?,?,?,?,?)", (f"m{i}", "nba", "moneyline", fair, mid, out))
+    for clv, pnl, lg, bt in [(0.03, 1.0, "nba", "moneyline"), (-0.01, -0.5, "nfl", "spread"), (0.02, 0.4, "nba", "total")]:
+        db.insert("bot_positions", {"mode": "paper", "module": "sports", "venue": "polymarket_us", "status": "closed",
+                                    "league": lg, "bet_type": bt, "clv": clv, "pnl": pnl, "won": int(pnl > 0),
+                                    "cost": 5, "entry_fee": 0, "exit_fee": 0, "closed_ts": 1})
+    s = summarize(*load(str(tmp_path / "r.db")))
+    assert s["markets_with_closing_line"] == 4 and s["settled_markets"] == 4
+    assert sum(r["n"] for r in s["calibration_consensus"]) == 3     # the 0.5 tie is excluded from calibration
+    assert s["avg_clv"] == pytest.approx(0.04 / 3) and s["positive_clv_rate"] == pytest.approx(2 / 3)
+    assert s["by_league"]["nba"]["n"] == 2 and s["by_bet_type"]["spread"]["avg_clv"] == pytest.approx(-0.01)
+    assert write_html(s, tmp_path / "out").exists()

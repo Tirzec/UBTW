@@ -282,8 +282,96 @@ $("bot-resume").onclick = async () => {
   await fetch("/api/bot/resume", { method: "POST" });
 };
 
+// ------------------------------------------------------------------ tabs
+let activeTab = (() => { try { return localStorage.getItem("tab") || "crypto"; } catch (e) { return "crypto"; } })();
+function showTab(name) {
+  activeTab = name;
+  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  ["crypto", "sports", "combined"].forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== name));
+  try { localStorage.setItem("tab", name); } catch (e) {}
+}
+document.querySelectorAll(".tab").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
+showTab(activeTab);
+
+const fmtTime = (ts) => ts ? new Date(ts * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) : "–";
+
+function statsTable(groups) {
+  const rows = Object.entries(groups || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.n || 0}</td>
+    <td class="num">${v.n ? pct(v.win_rate) : "–"}</td><td class="num">${v.n ? signed(v.total_pnl) : "–"}</td>
+    <td class="num">${v.n ? signed(v.return_on_stake * 100, 1) + "%" : "–"}</td>
+    <td class="num">${v.avg_clv == null ? "–" : signed(v.avg_clv * 100, 1) + "¢ (" + v.clv_n + ")"}</td></tr>`).join("");
+  return rows ? `<div class="table-wrap"><table><tr><th></th><th class="num">Trades</th><th class="num">Win</th><th class="num">P&L</th><th class="num">ROI</th><th class="num">Avg CLV</th></tr>${rows}</table></div>`
+    : '<p class="muted">no settled trades yet</p>';
+}
+
+function renderSports(m) {
+  if (!m) { $("sp-status").textContent = "Sports module off (sports.enabled in config.yaml; needs venue: polymarket_us)."; return; }
+  const st = m.module_state || {}, r = m.risk || {}, a = m.stats_all || {}, t = m.stats_today || {};
+  $("sp-mode").textContent = (m.mode || "").toUpperCase();
+  $("sp-status").textContent = `${st.games || 0} upcoming games · leagues ${(st.leagues || []).join(", ").toUpperCase()}` +
+    (r.halted ? ` · HALTED: ${r.halt_reason}` : "") + (m.status_note ? ` · ${m.status_note}` : "");
+  const cell = (l, v, c = "") => `<div><span class="label">${l}</span><b class="${c}">${v}</b></div>`;
+  const cls = (x) => (x == null ? "" : x >= 0 ? "pos" : "neg");
+  $("sp-risk").innerHTML = cell("Today's P&L", signed(r.day_pnl || 0), cls(r.day_pnl)) +
+    cell("To daily limit", usd(r.distance_to_daily_limit)) + cell("Today win rate", t.n ? pct(t.win_rate) : "–") +
+    cell("Avg win / loss", a.n ? `${signed(a.avg_win)} / ${signed(a.avg_loss)}` : "–");
+  $("sp-positions").innerHTML = (m.positions || []).length ? `<div class="table-wrap"><table><tr><th>Position</th><th class="num">Entry × shares</th><th class="num">Sellable now</th><th>Status</th></tr>` +
+    m.positions.map((p) => `<tr><td>#${p.id} ${esc(p.duration)} <b>${esc(p.side)}</b><br><span class="muted">${esc(p.bet_type || "")} · ${esc(p.status)} · start ${fmtTime(p.starts_at)}</span></td>
+      <td class="num">${num(p.entry_price, 3)} × ${num((p.shares || 0) - (p.exit_shares || 0), 2)}</td>
+      <td class="num">${p.last_value == null ? "–" : usd(p.last_value)}<br><span class="${cls(p.last_pnl)}">${p.last_pnl == null ? "" : signed(p.last_pnl)}</span></td>
+      <td class="muted">${esc(p.last_note || p.exit_reason || "")}</td></tr>`).join("") + "</table></div>" : '<p class="muted">none</p>';
+  $("sp-trades").innerHTML = (m.trades || []).length ? `<div class="table-wrap"><table><tr><th>Closed</th><th>Bet</th><th class="num">Entry → exit</th><th class="num">P&L</th><th class="num">CLV</th><th>Why</th></tr>` +
+    m.trades.slice(0, 25).map((p) => `<tr><td>${fmtTime(p.closed_ts)}</td><td>${esc(p.duration)} <b>${esc(p.side)}</b> <span class="muted">${esc(p.bet_type || "")}</span></td>
+      <td class="num">${num(p.entry_price, 3)} → ${p.exit_price ? num(p.exit_price, 3) : num(p.payout / Math.max(p.shares, 1e-9), 2)}</td>
+      <td class="num ${cls(p.pnl)}">${signed(p.pnl)}</td><td class="num ${cls(p.clv)}">${p.clv == null ? "–" : signed(p.clv * 100, 1) + "¢"}</td>
+      <td><span class="tag">${esc(p.exit_trigger || "resolution")}</span> <span class="muted">${esc(p.exit_reason || "")}</span></td></tr>`).join("") + "</table></div>" : '<p class="muted">no closed sports trades yet</p>';
+  $("sp-paper").textContent = `Paper sports trades: ${m.paper_trades_done || 0} / ${m.paper_trades_required || 200} required before live sports trading.`;
+  const src = st.sources || {};
+  $("sp-sources").innerHTML = "Odds sources: " + (Object.entries(src).map(([k, v]) => {
+    const b = v.budget || {};
+    return `${esc(k)} ${v.available ? '<span class="tag ok">on</span>' : '<span class="tag">no key</span>'}` +
+      (v.available ? ` <span class="muted">today ${b.day_used || 0}${b.limits && b.limits.day ? "/" + b.limits.day : ""}, month ${b.month_used || 0}${b.limits && b.limits.month ? "/" + b.limits.month : ""}${b.provider_remaining != null ? ", provider says " + b.provider_remaining + " left" : ""}</span>` : "") +
+      (v.error ? ` <span class="blocked">${esc(v.error)}</span>` : "");
+  }).join(" · ") || "none configured");
+  const rows = (st.board || []).map((r) => {
+    const b = r.best || {};
+    const isSig = !(r.blocked_by || []).length;
+    const reasons = (r.reasons || []).map((x) => `<li>${esc(x.text)} <span class="muted">${x.source && x.source.startsWith("http") ? `<a href="${esc(x.source)}" target="_blank" rel="noopener">source</a>` : esc(x.source || "")}${x.ts ? " · " + fmtTime(x.ts) : ""}</span></li>`).join("");
+    return `<tr class="${isSig ? "signal-row" : ""}"><td>${esc((r.league || "").toUpperCase())}<br><span class="muted">${fmtTime(r.starts_at)}</span></td>
+      <td>${esc(r.game)}<br><span class="muted">${esc(r.bet_type)}${r.line != null ? " " + r.line : ""}</span></td>
+      <td>${esc(b.label || "")}</td><td class="num">${b.bid != null ? num(b.bid) : "–"} / ${b.ask != null ? num(b.ask) : "–"}</td>
+      <td class="num">${b.fair != null ? pct(b.fair) : "–"}<br><span class="muted">${r.n_books ? r.n_books + " books" : ""}</span></td>
+      <td class="num ${b.edge > 0 ? "edge-pos" : "edge-neg"}">${b.edge != null ? signed(b.edge * 100, 1) + "%" : "–"}</td>
+      <td class="num">${r.confidence ? num(r.confidence, 2) : "–"}</td>
+      <td>${isSig ? '<span class="tag ok">SIGNAL</span>' : `<span class="muted">${esc((r.blocked_by || [])[0] || "")}</span>`}
+        ${(r.flags || []).length ? `<br><span class="muted">${esc(r.flags.join(" · "))}</span>` : ""}
+        ${reasons ? `<details class="card-reasons"><summary>research card</summary><ul>${reasons}</ul></details>` : ""}</td></tr>`;
+  }).join("");
+  $("sp-board").innerHTML = rows ? `<div class="table-wrap board"><table><tr><th>League</th><th>Game / market</th><th>Best side</th><th class="num">Bid / ask</th><th class="num">Fair</th><th class="num">Edge</th><th class="num">Conf.</th><th>Status &amp; key factors</th></tr>${rows}</table></div>`
+    : '<p class="muted">no upcoming games found yet</p>';
+  $("sp-by-league").innerHTML = statsTable(m.by_league);
+  $("sp-by-bet").innerHTML = statsTable(m.by_bet_type);
+}
+
+function renderCombined(mods) {
+  const g = (mods || {})._global || {};
+  const rows = Object.entries(mods || {}).filter(([k]) => k !== "_global").map(([k, m]) => {
+    const a = m.stats_all || {}, r = m.risk || {};
+    return `<tr><td><b>${esc(k)}</b> <span class="tag">${esc((m.mode || "").toUpperCase())}</span></td><td class="num">${signed(r.day_pnl || 0)}</td>
+      <td class="num">${a.n || 0}</td><td class="num">${a.n ? pct(a.win_rate) : "–"}</td><td class="num">${a.n ? signed(a.total_pnl) : "–"}</td>
+      <td class="num">${a.n ? usd(a.max_drawdown) : "–"}</td><td>${r.halted ? '<span class="tag bad">HALTED</span> ' + esc(r.halt_reason) : (r.day_stopped ? "stopped for today" : "running")}</td></tr>`;
+  }).join("");
+  $("combined").innerHTML = `<div class="stats"><div><span class="label">Combined today</span><b>${signed(g.day_pnl || 0)}</b></div>
+    <div><span class="label">Global daily limit</span><b>${usd(g.daily_loss_limit || 0, 0)}</b></div>
+    <div><span class="label">Open exposure</span><b>${usd(g.exposure || 0)}</b></div>
+    <div><span class="label">Global max exposure</span><b>${usd(g.max_exposure || 0, 0)}</b></div></div>
+    <div class="table-wrap"><table><tr><th>Module</th><th class="num">Today</th><th class="num">Trades</th><th class="num">Win</th><th class="num">All-time P&L</th><th class="num">Max DD</th><th>Status</th></tr>${rows}</table></div>`;
+}
+
 function render(s) {
   state = s;
+  renderSports((s.modules || {}).sports);
+  renderCombined(s.modules);
   renderBot(s.bot);
   renderTop(s);
   renderWindow("5m", (s.windows || {})["5m"]);

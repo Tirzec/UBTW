@@ -126,6 +126,86 @@ Known limitations on Polymarket US:
 
 ---
 
+## Strategy modules: crypto + sports
+
+The auto-trader runs **strategy modules** that share one executor:
+- order lifecycle and paper/live brokers
+- risk controls and the kill switch
+- the audit log, alerts and the dashboard
+
+Every module outputs the same signal: market, side, fair probability, confidence, edge, and
+the reasons with their sources.
+
+| Module | What it trades | Status |
+|---|---|---|
+| `crypto_updown` | BTC 5m/15m Up/Down | unchanged strategy (see below) |
+| `sports` | Polymarket US game markets: **moneyline, main spread, main total** (no props) | new, **paper** until 200 paper trades |
+
+Add a category by implementing `app/modules/base.py:StrategyModule`.
+
+Shared limits across all modules live under `risk_global` (combined daily loss $40, total
+exposure $60). The STOP button and `python -m app.trader stop` halt every module. The dashboard
+has **Crypto | Sports | Combined** tabs.
+
+### Sports module (`sports:` in config.yaml)
+
+**Leagues:** NFL, NBA, NHL and EPL are on. MLB, college football and basketball, MLS and the
+Champions League are in the config, off. Polymarket US had no EPL games listed when this was
+built, and soccer markets are only traded if their rules match a known template.
+
+**Fair value = free sportsbook consensus.** DraftKings, FanDuel and BetMGM, de-vigged (power
+method) and averaged. A book counts only if it quotes **both sides at exactly the same line** as
+the Polymarket market. For each book, the newest quote from any source is used.
+
+| Source | Free tier (checked in each provider's docs) | Used for | Key in `.env` |
+|---|---|---|---|
+| TheRundown | 20,000 data points/day **and** 200,000/month; 1 req/s; 5-min delay | DraftKings, FanDuel, BetMGM odds | `THERUNDOWN_API_KEY` |
+| SharpAPI | 12 req/min, no monthly cap; 60-s delay | fresher DraftKings/FanDuel | `SHARPAPI_KEY` |
+| The Odds API | 500 credits/month (event list free; 1 game × 1 market = 1 credit) | **Pinnacle check only**: within 60 min of start, only for games already showing an edge | `THE_ODDS_API_KEY` |
+| ESPN (unofficial) | free | injuries, news, scoreboards (venue/indoor, back-to-backs) | – |
+| Open-Meteo | free | weather at outdoor venues | – |
+
+**Quotas are hard-capped.** Every source keeps a persistent ledger and reads the provider's own
+"remaining" header. It stops at `budget.reserve` below the cap and never exceeds it, even across
+restarts. Usage is shown on the Sports tab. TheRundown is refreshed on a schedule:
+- every 3 h normally
+- every 30 min within 2 h of a game
+- a final closing snapshot
+
+**Trading rules:**
+- **Edge must beat fees + spread + 7%** (per-league buffer in config). The edge is measured
+  against the live ask, including Polymarket US's taker fee (0.095 × p × (1−p)). Entries are
+  maker-only limit orders.
+- **No entries in the last 15 minutes** before start unless the Pinnacle check agrees within 3
+  points. Resting orders are cancelled 2 minutes before start. No in-game trading
+  (`live_betting: false`).
+- **Fresh news blocks the game.** If an injury or news item is newer than the newest odds
+  quote, the game is blocked until the books update. Research never moves the fair price by
+  itself; it explains, flags and blocks.
+- **Exits:**
+  - take profit at +10%, or when the bid reaches fair value
+  - stop when fair value falls 5 points below its level at entry
+  - at kickoff: **hold to the result if the edge still holds, otherwise sell before the start**
+- **Liquidity filter:** spread ≤ 3¢ and at least 200 contracts at the best price.
+- **Risk (sports):** max $10 per trade, $30 daily loss, **$15 per game (every position in a game
+  counts as one exposure)**, $40 per league, pause after 6 losses in a row.
+- **Settlement:** Polymarket US's official settlement. Ties (e.g. NFL) pay $0.50. Postponements
+  beyond 2 days settle at the "last fair market price", **not refunded at your entry**.
+
+**Validation without paid history.** The app records every consensus line it sees
+(`sports_lines`), the **closing line** for every market (`sports_closing`), and the official
+settlement. Every trade gets **CLV = closing fair − entry price**. Run:
+```bash
+python -m backtest sports            # CLV, ROI, win rate, calibration by league and bet type
+```
+Let paper trading run long enough to build this dataset. Live sports trading needs
+`sports.live_enabled: true`, the normal live checks, and **200 closed paper sports trades**.
+
+Without any odds keys, the Sports tab still shows games, Polymarket prices and research, but
+computes no fair value and never trades.
+
+---
+
 ## Auto-trader (PAPER by default)
 
 The app can trade by itself. It starts in **PAPER** mode: real signals, real Polymarket order
@@ -443,6 +523,8 @@ app/main.py      FastAPI + websocket web/           dashboard (plain HTML/JS)
 app/notify.py    phone push alerts (ntfy / Telegram)
 app/trading/     auto-trader: rules, risk, paper/live brokers, audit store, live gate
 app/trader.py    kill switch / status CLI
+app/modules/      strategy modules: base interface, crypto_updown, sports (markets, odds, research, module)
+backtest/sports_report.py  sports CLV/ROI/calibration from recorded data
 app/ingest/us_markets.py  Polymarket US discovery, rules check, order books
 app/trading/us_broker.py  Polymarket US live orders (Ed25519-signed REST)
 backtest/        collect / replay / train / report

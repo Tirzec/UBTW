@@ -1,6 +1,6 @@
 # Multi-Market Architecture & Sports Module: Proposal
 
-Status: **approved with changes (free data sources only)**; see section 5. Being built. Researched 2026-11-09 against the live
+Status: **built** (free data sources only); see section 5 and the README's \"Strategy modules\" section. Researched 2026-11-09 against the live
 Polymarket US gateway, its docs (docs.polymarket.us), and the data providers below.
 
 ---

@@ -120,6 +120,10 @@ def main():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     ap = argparse.ArgumentParser(prog="python -m backtest")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sp = sub.add_parser("sports", help="CLV/ROI/calibration from the sports data the app recorded")
+    sp.add_argument("--db", default=None)
+    sp.add_argument("--mode", default="paper", choices=["paper", "live"])
+    sp.add_argument("--out", default="reports/sports")
     for name in ("collect", "train", "run"):
         p = sub.add_parser(name)
         p.add_argument("--db", default=None)
@@ -146,6 +150,17 @@ def main():
             p.add_argument("--out", default="reports/backtest")
     args = ap.parse_args()
     cfg = load_config()
+    if args.cmd == "sports":
+        from .sports_report import load, summarize, write_html
+        db = args.db or str(resolve_path(cfg, cfg.get("db_path", "data/signals.db")))
+        summary = summarize(*load(db, args.mode))
+        out = write_html(summary, resolve_path(cfg, args.out))
+        print(json.dumps({k: summary[k] for k in ("markets_with_closing_line", "settled_markets", "avg_clv",
+                                                   "positive_clv_rate", "brier_consensus",
+                                                   "brier_polymarket_close")}, indent=2, default=float))
+        print(json.dumps(summary["trades"], indent=2, default=float))
+        print(f"report: {out}")
+        return
     args.db = args.db or str(resolve_path(cfg, "data/backtest.db"))
     if args.cmd == "collect":
         asyncio.run(collect(cfg, args.db, args.days, args.durations, args.min_trade_usd))
