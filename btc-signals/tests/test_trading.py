@@ -406,6 +406,12 @@ def test_live_gate_needs_flag_and_exact_phrase(tmp_path, monkeypatch):
         with pytest.raises(SystemExit, match="needs 3.11"):
             check_live_gates(_cfg(), str(db), input_fn=lambda _: CONFIRM_PHRASE, geoblock_fn=ok_geo)
         return
+    try:
+        import polymarket  # noqa: F401  # optional intl SDK; not installed by requirements.txt
+    except ImportError:                      # without it the intl gate must refuse LIVE
+        with pytest.raises(SystemExit, match="official SDK missing"):
+            check_live_gates(_cfg(), str(db), input_fn=lambda _: CONFIRM_PHRASE, geoblock_fn=ok_geo)
+        return
     with pytest.raises(SystemExit, match="live_trading_enabled"):
         check_live_gates(_cfg(live_trading_enabled=False), str(db), input_fn=lambda _: CONFIRM_PHRASE,
                          geoblock_fn=ok_geo)
