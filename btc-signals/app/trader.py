@@ -32,8 +32,18 @@ def _set(c, key, value):
     c.commit()
 
 
-async def _direct_cancel_all() -> str:
+async def _direct_cancel_all(cfg: dict | None = None) -> str:
     """Belt and braces for LIVE: cancel on the exchange even if the app isn't running."""
+    if (cfg or {}).get("venue") == "polymarket_us":
+        kid, sec = os.environ.get("POLYMARKET_KEY_ID"), os.environ.get("POLYMARKET_SECRET_KEY")
+        if not (kid and sec):
+            return "no Polymarket US keys in .env - nothing to cancel on the exchange"
+        from .trading.us_broker import UsLiveBroker
+        b = UsLiveBroker(kid, sec, lambda t: {})
+        try:
+            return f"Polymarket US: canceled {await b.cancel_all()} open orders"
+        finally:
+            await b.close()
     key, wallet = os.environ.get("POLYMARKET_PRIVATE_KEY"), os.environ.get("POLYMARKET_WALLET_ADDRESS")
     if not key:
         return "no live credentials in .env - nothing to cancel on the exchange"
@@ -60,7 +70,7 @@ def main(argv=None) -> None:
         _set(c, "kill_requested", {"ts": time.time(), "reason": a.reason})
         print("Kill switch set: the running bot cancels all orders and halts within ~1 second.")
         if (cfg.get("trading", {}) or {}).get("mode") == "live":
-            print(asyncio.run(_direct_cancel_all()))
+            print(asyncio.run(_direct_cancel_all(cfg)))
         print("Open positions are NOT sold automatically; manage them in the Polymarket app.")
     elif a.command == "resume":
         _set(c, "kill_requested", None)
@@ -74,10 +84,14 @@ def main(argv=None) -> None:
             print(f"  #{r['id']} {r['mode']} {r['slug']} {r['side']} {r['status']} shares={r['shares']:.2f} "
                   f"entry={r['entry_price'] or 0:.2f} last_pnl={r['last_pnl'] or 0:+.3f}")
     else:
-        for mode in ("paper", "live"):
-            rows = [dict(r) for r in c.execute("SELECT * FROM bot_positions WHERE mode=? AND status='closed' "
-                                               "ORDER BY closed_ts", (mode,))]
-            print(f"{mode.upper()}:\n{format_stats(len(rows), bot_stats(rows))}")
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(bot_positions)")}
+        vcol = "COALESCE(venue,'polymarket_intl')" if "venue" in cols else "'polymarket_intl'"
+        print("current venue:", cfg.get("venue", "polymarket_intl"))
+        for venue in ("polymarket_us", "polymarket_intl"):
+            for mode in ("paper", "live"):
+                rows = [dict(r) for r in c.execute(f"SELECT * FROM bot_positions WHERE mode=? AND {vcol}=? "
+                                                   "AND status='closed' ORDER BY closed_ts", (mode, venue))]
+                print(f"{venue} {mode.upper()}:\n{format_stats(len(rows), bot_stats(rows))}")
 
 
 if __name__ == "__main__":

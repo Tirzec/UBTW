@@ -16,6 +16,10 @@ from .sources import build_feed
 log = logging.getLogger("feeds")
 
 
+def venue_of(cfg: dict) -> str:
+    return (cfg.get("venue") or "polymarket_intl").strip()
+
+
 @dataclass
 class ReferencePrice:
     spot: float | None        # Chainlink BTC/USD (or synthetic estimate)
@@ -30,8 +34,9 @@ class FeedManager:
         fc = cfg.get("feeds", {})
         health = fc.get("health", {})
         secrets = cfg.get("secrets", {})
+        ref_key = "reference_us" if venue_of(cfg) == "polymarket_us" else "reference"
         self.reference_feeds: list[PriceFeed] = [
-            build_feed(c, "reference", secrets, health) for c in fc.get("reference", [])]
+            build_feed(c, "reference", secrets, health) for c in fc.get(ref_key, fc.get("reference", []))]
         self.spot_feeds: list[PriceFeed] = [
             build_feed(c, "spot", secrets, health) for c in fc.get("spot", [])]
         names = [f.name for f in self.reference_feeds + self.spot_feeds]
@@ -54,6 +59,32 @@ class FeedManager:
             self.ref_spot[t.source].add(t.ts, t.price)
         elif t.kind == "twap":
             self.ref_twap[t.source].add(t.ts, t.price)
+
+    async def seed_history(self, seconds: int = 1200,
+                           url: str = "https://gateway.polymarket.us/v1/asset-prices/history") -> int:
+        """Preload ~20 min of 1s BTC prices (public BRTI history) into every spot series so the
+        volatility estimate is realistic from the first minute instead of after warm-up.
+        Live trades overwrite these seconds as they arrive."""
+        import httpx
+        now = int(time.time())
+        try:
+            async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "btc-signals/1.0"}) as c:
+                r = await c.get(url, params={"assets": "crypto:btc", "bucket": "ASSET_PRICE_BUCKET_1S",
+                                             "from": now - seconds, "to": now})
+                r.raise_for_status()
+                candles = r.json()["series"][0]["candles"]
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not preload price history (%s); volatility starts from live data", e)
+            return 0
+        n = 0
+        for b in self.bars.values():
+            for cnd in candles:
+                sec, px = int(cnd["timestamp"]), float(cnd["close"])
+                if sec not in b:
+                    b.add_bar(sec, px, px, px, px)
+                    n += 1
+        log.info("preloaded %d seconds of BTC history for volatility", len(candles))
+        return n
 
     async def start(self) -> None:
         for f in self.reference_feeds + self.spot_feeds:

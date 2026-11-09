@@ -14,6 +14,7 @@ T0 = 1_794_234_000  # a real 5m boundary
 def make_engine(tmp_path):
     cfg = load_config()
     cfg["db_path"] = str(tmp_path / "t.db")
+    cfg["venue"] = "polymarket_intl"       # this test drives the Chainlink (RTDS) feed path
     cfg["news"]["enabled"] = False
     cfg["calendar"]["enabled"] = False
     cfg["data_quality"].update(max_gap_bps=15, gap_persist_s=2, recover_after_s=5)

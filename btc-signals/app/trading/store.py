@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS bot_events (
 CREATE TABLE IF NOT EXISTS bot_state (key TEXT PRIMARY KEY, value TEXT, updated REAL);
 """
 
-SECRET_ENV = ("POLYMARKET_PRIVATE_KEY", "POLY_API_SECRET", "POLY_API_PASSPHRASE", "POLY_API_KEY",
+SECRET_ENV = ("POLYMARKET_PRIVATE_KEY", "POLYMARKET_SECRET_KEY", "POLY_API_SECRET", "POLY_API_PASSPHRASE", "POLY_API_KEY",
               "TELEGRAM_BOT_TOKEN", "NTFY_TOKEN")
 _HEX_KEY = re.compile(r"\b(0x)?[0-9a-fA-F]{64}\b")
 
@@ -80,10 +80,14 @@ def setup_trade_log(path: Path) -> None:
 
 
 class TradeStore:
-    def __init__(self, db, mode: str):
+    def __init__(self, db, mode: str, venue: str = "polymarket_intl"):
         self.db = db
         self.mode = mode
+        self.venue = venue
         db.conn.executescript(SCHEMA)
+        cols = {r["name"] for r in db.query("PRAGMA table_info(bot_positions)")}
+        if "venue" not in cols:      # older databases: rows before this column are international
+            db.conn.execute("ALTER TABLE bot_positions ADD COLUMN venue TEXT DEFAULT 'polymarket_intl'")
         db.conn.commit()
         self.log = logging.getLogger("trader")
 
@@ -110,6 +114,7 @@ class TradeStore:
     # ---------------------------------------------------------------- positions
     def new_position(self, **kw) -> int:
         kw.setdefault("mode", self.mode)
+        kw.setdefault("venue", self.venue)
         return self.db.insert("bot_positions", kw)
 
     def update_position(self, pid: int, **kw) -> None:
@@ -120,12 +125,14 @@ class TradeStore:
         return self.db.query("SELECT * FROM bot_positions WHERE id=?", (pid,))[0]
 
     def active_positions(self) -> list[dict]:
-        return self.db.query("SELECT * FROM bot_positions WHERE mode=? AND status IN "
-                             "('opening','open','closing','resolving') ORDER BY id", (self.mode,))
+        return self.db.query("SELECT * FROM bot_positions WHERE mode=? AND COALESCE(venue,'polymarket_intl')=? "
+                             "AND status IN ('opening','open','closing','resolving') ORDER BY id",
+                             (self.mode, self.venue))
 
     def closed_positions(self, mode: str | None = None, since: float = 0, limit: int = 100000) -> list[dict]:
-        return self.db.query("SELECT * FROM bot_positions WHERE mode=? AND status='closed' AND closed_ts>=? "
-                             "ORDER BY closed_ts LIMIT ?", (mode or self.mode, since, limit))
+        return self.db.query("SELECT * FROM bot_positions WHERE mode=? AND COALESCE(venue,'polymarket_intl')=? "
+                             "AND status='closed' AND closed_ts>=? ORDER BY closed_ts LIMIT ?",
+                             (mode or self.mode, self.venue, since, limit))
 
     # ---------------------------------------------------------------- state
     def get_state(self, key: str, default=None):

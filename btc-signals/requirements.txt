@@ -7,3 +7,4 @@ pyyaml>=6
 python-dotenv>=1.0
 pytest>=8
 pytest-asyncio>=0.23
+pynacl>=1.5

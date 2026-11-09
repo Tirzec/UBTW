@@ -174,7 +174,8 @@ def main(argv: list[str] | None = None) -> None:
         from .trading.live_gate import check_live_gates
         cfg["_live_confirmed"] = check_live_gates(
             cfg, str(resolve_path(cfg, cfg.get("db_path", "data/signals.db"))))
-        print("\n  *** LIVE TRADING ENABLED - real orders will be placed ***\n", flush=True)
+        print(f"\n  *** LIVE TRADING ENABLED on {cfg.get('venue', 'polymarket_intl')} - real orders "
+              "will be placed ***\n", flush=True)
     sc = cfg.get("server", {})
     host = sc.get("host", "127.0.0.1")
     port = int(args.port or sc.get("port", 8000))

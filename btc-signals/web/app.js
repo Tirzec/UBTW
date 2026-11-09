@@ -225,8 +225,10 @@ function renderAlerts(s) {
 function renderBot(b) {
   const badge = $("bot-mode");
   const mode = (b && b.mode) || "off";
-  $("brand-sub").textContent = mode === "live" ? "LIVE: places real orders" : mode === "paper" ? "paper trading: no real orders" : "signals only: never trades";
+  const venue = state && state.venue === "polymarket_us" ? "Polymarket US" : "Polymarket (intl)";
+  $("brand-sub").textContent = venue + " · " + (mode === "live" ? "LIVE: places real orders" : mode === "paper" ? "paper trading: no real orders" : "signals only: never trades");
   badge.textContent = mode === "off" ? "TRADER OFF" : mode.toUpperCase();
+  badge.title = state && state.venue === "polymarket_us" ? "Polymarket US (CFTC-regulated)" : "polymarket.com";
   badge.className = "mode-badge " + mode;
   if (mode === "off") { $("bot-status-line").textContent = "auto-trader disabled in config.yaml"; return; }
   const r = b.risk || {};

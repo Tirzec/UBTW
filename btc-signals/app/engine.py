@@ -55,10 +55,20 @@ class Engine:
         self.cfg = cfg
         self.db = DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db")))
         self.http = httpx.AsyncClient(timeout=10, headers={"User-Agent": "btc-signals/1.0"})
+        from .feeds.manager import venue_of
+        self.venue = venue_of(cfg)
         self.feeds = FeedManager(cfg)
-        self.discovery = Discovery(cfg, self.http)
+        if self.venue == "polymarket_us":
+            from .ingest.us_markets import UsDiscovery
+            self.discovery = UsDiscovery(cfg, self.http)
+        else:
+            self.discovery = Discovery(cfg, self.http)
         self.discovery.on_settled = self._on_settled
-        self.clob = ClobMarketStream(cfg, self.http)
+        if self.venue == "polymarket_us":
+            from .ingest.us_markets import UsBookPoller
+            self.clob = UsBookPoller(cfg, self.http)
+        else:
+            self.clob = ClobMarketStream(cfg, self.http)
         self.derivs = Derivatives(cfg, self.http)
         self.news = NewsFeed(cfg, on_new=self._on_headline)
         self.notifier = Notifier(cfg, self.http)
@@ -70,7 +80,7 @@ class Engine:
         self.paper = PaperTrader(self.db, pc.get("stake_usd", 50), pc.get("enabled", True))
         self.sc = cfg.get("signal", {})
         self.xc = cfg.get("exits", {})
-        self.durations = cfg.get("polymarket", {}).get("durations", ["5m", "15m"])
+        self.durations = list(self.discovery.durations)
         self.evals: dict[str, WindowEval] = {}
         self.entries: dict[str, int] = {}
         self.last_action: dict[str, str] = {}
@@ -94,10 +104,11 @@ class Engine:
         if self.trading_enabled:
             from .trading.store import TradeStore, setup_trade_log
             setup_trade_log(resolve_path(cfg, tc.get("log_file", "data/trader.log")))
-            self.trade_store = TradeStore(self.db, mode)
+            self.trade_store = TradeStore(self.db, mode, self.venue)
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
+        await self.feeds.seed_history()
         await self.feeds.start()
         for name, coro in (("discovery", self.discovery.run()), ("clob", self.clob.run()),
                            ("derivs", self.derivs.run()), ("news", self.news.run()),
@@ -116,7 +127,12 @@ class Engine:
     async def _start_trader(self) -> None:
         from .trading.broker import LiveBroker, PaperBroker
         from .trading.trader import AutoTrader
-        if self.trade_mode == "live":
+        if self.trade_mode == "live" and self.venue == "polymarket_us":
+            from .trading.us_broker import UsLiveBroker
+            creds = self.cfg["_live_confirmed"]
+            broker = UsLiveBroker(creds["key_id"], creds["secret_key"], self.fee_schedule_for,
+                                  base=self.cfg.get("polymarket_us", {}).get("api_url", "https://api.polymarket.us"))
+        elif self.trade_mode == "live":
             creds = self.cfg["_live_confirmed"]
             broker = await LiveBroker.connect(creds["private_key"], creds["wallet"], self.fee_schedule_for)
         else:
@@ -265,6 +281,7 @@ class Engine:
             lookback_s=L, locked_mean=locked,
             vol_halflife_s=float(self.cfg.get("model", {}).get("vol_halflife_s", 900)),
             min_vol=float(self.cfg.get("model", {}).get("min_vol_per_s", 2e-5)),
+            vol_step_s=int(self.cfg.get("model", {}).get("vol_step_s", 60)),
             book_imb=dfeat.get("book_imb", 0.0), derivs=dfeat,
             news_score=self.news.score(now) if self.news.enabled else 0.0)
         p_up, parts = self.models[w.duration].predict(fs)
@@ -495,4 +512,5 @@ class Engine:
             "notifications": self.notifier.status(),
             "alerts": list(self.alerts)[-20:],
             "bot": self.trader.snapshot(now) if self.trader else {"mode": "off"},
+            "venue": self.venue,
         }

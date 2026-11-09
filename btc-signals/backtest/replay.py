@@ -31,7 +31,7 @@ DEFAULTS = {
     "max_spread": 0.04, "min_seconds_left": 10, "max_seconds_left_5m": 290,
     "max_seconds_left_15m": 880, "vol_halflife_s": 900, "min_vol": 2e-5,
     "hold_buffer": 0.01, "stop_threshold": 0.15, "take_profit": 0.20, "lock_remaining_ev": 0.03,
-    "use_exits": True, "lookback_s": 60,
+    "use_exits": True, "lookback_s": 60, "vol_step_s": 60,
 }
 
 
@@ -156,7 +156,8 @@ def features_at(w: WindowData, bars: DenseBars, t: int, scale: float, cfg: dict)
     locked = bars.mean(w.end - L, sec) * scale if left <= L and sec >= w.end - L else None
     return compute_features(bars=b, ref_spot=ref, price_to_beat=w.price_to_beat,
                             seconds_left=left, lookback_s=L, locked_mean=locked,
-                            vol_halflife_s=cfg["vol_halflife_s"], min_vol=cfg["min_vol"])
+                            vol_halflife_s=cfg["vol_halflife_s"], min_vol=cfg["min_vol"],
+                            vol_step_s=cfg["vol_step_s"])
 
 
 def window_scale(w: WindowData, bars: DenseBars) -> float:

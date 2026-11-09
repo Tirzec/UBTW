@@ -7,6 +7,20 @@ server:
 
 db_path: data/signals.db
 
+# Which exchange to trade:
+#   polymarket_us   - Polymarket US (CFTC-regulated, for US residents; KYC + API key)
+#   polymarket_intl - polymarket.com (blocks US users)
+venue: polymarket_us
+
+polymarket_us:
+  gateway_url: https://gateway.polymarket.us     # public market data, no key
+  api_url: https://api.polymarket.us             # trading (signed with your API key)
+  durations: [5m, 15m]
+  discovery_interval_s: 5
+  book_poll_interval_s: 1
+  taker_fee_theta:                 # blank = use each market's feeCoefficient (0.095 today;
+                                   # 0.0695 for your first 7 days - set 0.0695 then if you like)
+
 # ---------------------------------------------------------------------------
 # Price feeds. Every source implements the same PriceFeed interface
 # (app/feeds/base.py). Swap or reorder sources here; no code changes needed.
@@ -18,7 +32,12 @@ db_path: data/signals.db
 #   as the cross-check against Chainlink. First healthy one is primary.
 # ---------------------------------------------------------------------------
 feeds:
-  reference:
+  reference_us:                    # used when venue: polymarket_us (settles on CF Benchmarks BRTI)
+    - type: polymarket_us_brti
+      url: https://gateway.polymarket.us/v1/asset-prices/history
+      poll_interval_s: 1
+      no_price_after_s: 6
+  reference:                       # used when venue: polymarket_intl (settles on Chainlink)
     - type: polymarket_rtds        # legacy RTDS, no auth, deprecated by Polymarket
       url: wss://ws-live-data.polymarket.com
     - type: polybolt               # replacement; needs POLY_API_KEY/SECRET/PASSPHRASE in .env
@@ -75,7 +94,8 @@ polymarket:
 model:
   path_5m: models/model_5m.json
   path_15m: models/model_15m.json
-  vol_halflife_s: 900              # EWMA half-life for 1s realised vol
+  vol_halflife_s: 900              # EWMA half-life for realised vol
+  vol_step_s: 60                   # estimate vol from 60s returns (1s returns understate it ~6x)
   min_vol_per_s: 0.00002           # floor on sigma (log-return per sqrt(second))
 
 signal:

@@ -1,0 +1,210 @@
+"""Polymarket US (CFTC-regulated) BTC Up/Down markets: discovery, rules check, order books.
+
+Verified against the live public API on 2026-11-09:
+  * slugs:   cpc-btc-updown-{5m|15m}-YYYY-MM-DD-HHMMz   (window start, UTC)
+  * GET https://gateway.polymarket.us/v1/market/slug/{slug} -> market.assetPriceTerms
+      priceToBeat (published a few seconds after the window opens), settlementPrice,
+      indexSymbol "BRTI"; market.feeCoefficient (0.095), minimumTradeQty (0.01),
+      status MARKET_STATUS_OPEN / CLOSED (also before opening!) / RESOLVED
+  * GET .../v1/markets/{slug}/book -> marketData.bids/offers (LONG = "Up" side prices)
+      + stats.lastTradePx / sharesTraded
+  * Settlement: simple average of 60 BRTI prices in the minute before open and close;
+    a flat window settles Up.
+Only the long (Up) instrument trades; Down is the short side at price 1 - p. The bot keeps
+two synthetic books, "<slug>:long" (Up) and "<slug>:short" (Down), so the rest of the app
+treats both venues the same.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from datetime import datetime, timezone
+
+import httpx
+
+from ..rules import RuleSpec
+from .discovery import DURATION_SECONDS, Discovery, Window
+from .polymarket_ws import BookStore
+
+log = logging.getLogger("polymarket_us")
+
+GATEWAY = "https://gateway.polymarket.us"
+
+
+def us_slug(duration: str, start: int, asset: str = "btc") -> str:
+    t = datetime.fromtimestamp(start, tz=timezone.utc)
+    return f"cpc-{asset}-updown-{duration}-{t:%Y-%m-%d-%H%M}z"
+
+
+def long_token(slug: str) -> str:
+    return f"{slug}:long"
+
+
+def short_token(slug: str) -> str:
+    return f"{slug}:short"
+
+
+def _amount(x) -> float | None:
+    if isinstance(x, dict):
+        x = x.get("value")
+    try:
+        return None if x is None else float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def validate_us_rules(market: dict, duration: str, expected_lookback: list[int] | None = None) -> RuleSpec:
+    """Check the market text/terms match what the model assumes (60s BRTI average, >= is Up)."""
+    t = market.get("assetPriceTerms") or {}
+    text = market.get("description") or ""
+    low = text.lower()
+    spec = RuleSpec(asset=(t.get("asset") or {}).get("symbol"), duration=t.get("horizon"),
+                    twap_enabled=True, twap_lookback_s=60, resolution_mechanism="exchange",
+                    source_url=t.get("indexSymbol") or "", comparator=">=" if
+                    "greater than or equal to" in low else None, raw_text=text)
+    mm = []
+    if t.get("marketType") != "ASSET_PRICE_MARKET_TYPE_UP_DOWN":
+        mm.append(f"market type {t.get('marketType')!r}, expected UP_DOWN")
+    if spec.asset != "btc":
+        mm.append(f"asset {spec.asset!r}, expected 'btc'")
+    if spec.duration not in (None, duration):
+        mm.append(f"horizon {spec.duration!r}, expected {duration!r}")
+    if t.get("indexSymbol") != "BRTI":
+        mm.append(f"index {t.get('indexSymbol')!r}, model assumes CF Benchmarks BRTI")
+    if "60 brti prices" not in low or "simple average" not in low:
+        mm.append("rules no longer describe a 60-price simple average (model assumes a 60s average)")
+    if spec.comparator != ">=":
+        mm.append("rules text lacks 'greater than or equal to' (tie handling may differ)")
+    spec.mismatches = mm
+    return spec
+
+
+def apply_us_market(w: Window, market: dict, taker_theta_override: float | None = None) -> Window:
+    """Fill a Window from a Polymarket US market payload (pure; unit-tested)."""
+    t = market.get("assetPriceTerms") or {}
+    w.found = True
+    w.venue = "polymarket_us"
+    w.title = market.get("subtitle") or market.get("question") or w.slug
+    w.condition_id = str(market.get("id", ""))
+    w.token_up, w.token_down = long_token(w.slug), short_token(w.slug)
+    theta = taker_theta_override if taker_theta_override is not None else market.get("feeCoefficient", 0.095)
+    w.fee_schedule = {"rate": float(theta), "exponent": 1, "takerOnly": True}
+    w.tick_size = float(market.get("orderPriceMinTickSize") or 0.01)
+    w.min_size = float(market.get("minimumTradeQty") or 1)
+    status = market.get("status", "")
+    w.accepting_orders = status == "MARKET_STATUS_OPEN"
+    w.rules = validate_us_rules(market, w.duration)
+    ptb = _amount(t.get("priceToBeat"))
+    if ptb is not None:
+        w.gamma_ptb = ptb
+    final = _amount(t.get("settlementPrice"))
+    if final is not None:
+        w.final_price = final
+    if status == "MARKET_STATUS_RESOLVED" and w.final_price is not None and w.gamma_ptb is not None:
+        w.outcome = "UP" if w.final_price >= w.gamma_ptb else "DOWN"   # flat window settles Up
+    return w
+
+
+class UsDiscovery(Discovery):
+    """Same interface as Discovery; talks to Polymarket US's public gateway."""
+
+    def __init__(self, cfg: dict, client: httpx.AsyncClient | None = None):
+        super().__init__(cfg, client)
+        uc = cfg.get("polymarket_us", {}) or {}
+        self.gateway = uc.get("gateway_url", GATEWAY)
+        self.durations = uc.get("durations", ["5m", "15m"])
+        self.interval = float(uc.get("discovery_interval_s", 5))
+        self.theta_override = uc.get("taker_fee_theta")
+        self.site_url = None
+
+    def get(self, duration: str, start: int) -> Window:
+        slug = us_slug(duration, start)
+        w = self.windows.get(slug)
+        if w is None:
+            w = Window(duration, start, start + DURATION_SECONDS[duration], slug, venue="polymarket_us")
+            self.windows[slug] = w
+        return w
+
+    async def refresh(self, w: Window) -> None:
+        r = await self.client.get(f"{self.gateway}/v1/market/slug/{w.slug}")
+        w.last_fetch = time.time()
+        if r.status_code == 404:
+            return
+        r.raise_for_status()
+        m = r.json().get("market") or {}
+        if m:
+            apply_us_market(w, m, None if self.theta_override in (None, "") else float(self.theta_override))
+
+
+def us_book_to_store(store: BookStore, slug: str, data: dict, now: float, last_shares: dict) -> None:
+    """Write a /book response into the long (Up) and derived short (Down) books (pure)."""
+    md = data.get("marketData") or data
+    bids = [(_amount(x.get("px")), float(x.get("qty") or 0)) for x in md.get("bids") or []]
+    offers = [(_amount(x.get("px")), float(x.get("qty") or 0)) for x in md.get("offers") or []]
+    bids = [(p, q) for p, q in bids if p is not None and q > 0]
+    offers = [(p, q) for p, q in offers if p is not None and q > 0]
+    fmt = lambda lv: [{"price": f"{p:.4f}", "size": f"{q}"} for p, q in lv]  # noqa: E731
+    store.book(long_token(slug)).snapshot(fmt(bids), fmt(offers), now)
+    # Down side: buying Down at x == selling Up at 1-x
+    store.book(short_token(slug)).snapshot(fmt([(round(1 - p, 4), q) for p, q in offers]),
+                                           fmt([(round(1 - p, 4), q) for p, q in bids]), now)
+    st = md.get("stats") or {}
+    shares = st.get("sharesTraded")
+    px = _amount(st.get("lastTradePx"))
+    if shares is not None and px is not None:
+        shares = float(shares)
+        prev = last_shares.get(slug)
+        last_shares[slug] = shares
+        if prev is not None and shares > prev:
+            q = shares - prev
+            for tok, p in ((long_token(slug), px), (short_token(slug), round(1 - px, 4))):
+                b = store.book(tok)
+                b.last_trade = p
+                b.trades.append((now, p, q))
+
+
+class UsBookPoller:
+    """Same interface as ClobMarketStream, fed by polling the public /book endpoint
+    (well inside the 25 req/s limit: 2 markets x 1/s)."""
+
+    def __init__(self, cfg: dict, client: httpx.AsyncClient | None = None):
+        uc = cfg.get("polymarket_us", {}) or {}
+        self.gateway = uc.get("gateway_url", GATEWAY)
+        self.interval = float(uc.get("book_poll_interval_s", 1.0))
+        self.client = client or httpx.AsyncClient(timeout=10)
+        self.store = BookStore()
+        self._slugs: set[str] = set()
+        self._last_shares: dict[str, float] = {}
+        self.connected = False
+        self.last_msg = 0.0
+        self.last_error = ""
+        self.reconnects = 0
+
+    def set_assets(self, assets: set[str]) -> None:
+        self._slugs = {a.rsplit(":", 1)[0] for a in assets if a}
+
+    async def poll_slug(self, slug: str) -> None:
+        r = await self.client.get(f"{self.gateway}/v1/markets/{slug}/book")
+        if r.status_code == 404:
+            return
+        r.raise_for_status()
+        us_book_to_store(self.store, slug, r.json(), time.time(), self._last_shares)
+        self.last_msg = time.time()
+
+    async def refresh_rest(self, token: str) -> None:
+        await self.poll_slug(token.rsplit(":", 1)[0])
+
+    async def run(self) -> None:
+        while True:
+            t0 = time.time()
+            try:
+                await asyncio.gather(*(self.poll_slug(s) for s in list(self._slugs)))
+                self.connected = bool(self._slugs)
+                self.last_error = ""
+            except Exception as e:  # noqa: BLE001
+                self.connected = False
+                self.reconnects += 1
+                self.last_error = f"{type(e).__name__}: {e}"[:200]
+                log.warning("Polymarket US book poll failed: %s", self.last_error)
+            await asyncio.sleep(max(0.1, self.interval - (time.time() - t0)))

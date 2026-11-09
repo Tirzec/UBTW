@@ -55,6 +55,9 @@ class SecondBars:
         if self.last_sec is None or sec > self.last_sec:
             self.last_sec = int(sec)
 
+    def __contains__(self, sec: int) -> bool:
+        return int(sec) in self._bars
+
     def _trim(self) -> None:
         if len(self._bars) > self.max_seconds * 1.2 and self.last_sec is not None:
             cutoff = self.last_sec - self.max_seconds

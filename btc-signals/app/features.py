@@ -61,14 +61,25 @@ def log_returns(close: np.ndarray) -> np.ndarray:
     return np.diff(np.log(c))
 
 
-def ewma_vol(close: np.ndarray, halflife_s: float = 900, floor: float = 2e-5) -> float:
-    """EWMA std of 1s log returns (per sqrt(second))."""
-    r = log_returns(close)
+def ewma_vol(close: np.ndarray, halflife_s: float = 900, floor: float = 2e-5, step: int = 1) -> float:
+    """EWMA volatility per sqrt(second), estimated from `step`-second log returns.
+
+    step > 1 matters a lot in practice: smoothed indices (BRTI) and sparse/bouncing trade
+    prices make 1-second returns understate real volatility (measured 2026-11-09 on BRTI:
+    1s steps -> 7%/yr, 60s steps -> 42%/yr). Overlapping step-second returns, scaled by
+    1/sqrt(step), recover the volatility that matters over a 5-15 minute window."""
+    c = np.asarray(close, dtype=float)
+    if step > 1 and len(c) > step + 30:
+        r = np.log(c[step:] / c[:-step])
+        scale = float(step)
+    else:
+        r = log_returns(c)
+        scale = 1.0
     if len(r) == 0:
         return floor
     lam = 0.5 ** (1.0 / max(halflife_s, 1.0))
     w = lam ** np.arange(len(r) - 1, -1, -1)
-    var = float(np.sum(w * r * r) / np.sum(w))
+    var = float(np.sum(w * r * r) / np.sum(w)) / scale
     return max(math.sqrt(var), floor)
 
 
@@ -172,12 +183,12 @@ class FeatureSet:
 
 def compute_features(*, bars: BarArrays, ref_spot: float, price_to_beat: float,
                      seconds_left: float, lookback_s: float, locked_mean: float | None = None,
-                     vol_halflife_s: float = 900, min_vol: float = 2e-5,
+                     vol_halflife_s: float = 900, min_vol: float = 2e-5, vol_step_s: int = 60,
                      book_imb: float = 0.0, derivs: dict | None = None,
                      news_score: float = 0.0) -> FeatureSet:
     """All model inputs at one instant. `bars` should cover >= 15 minutes of 1s data."""
     c = bars.close
-    sigma = ewma_vol(c, vol_halflife_s, min_vol)
+    sigma = ewma_vol(c, vol_halflife_s, min_vol, vol_step_s)
     mean, sd = twap_terminal(ref_spot, seconds_left, lookback_s, sigma, locked_mean)
     p0 = prob_up(mean, sd, price_to_beat)
     d_sig = (mean - price_to_beat) / sd if sd > 1e-12 else math.copysign(10.0, mean - price_to_beat)

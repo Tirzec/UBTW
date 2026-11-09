@@ -31,6 +31,19 @@ def test_ewma_vol_recovers_sigma():
     assert est == pytest.approx(sigma, rel=0.08)
 
 
+def test_ewma_vol_step_corrects_smoothed_series():
+    # a random walk observed through a 30-second moving average (like a smoothed index):
+    # 1s returns badly understate the volatility; 60s steps recover it
+    rng = np.random.default_rng(5)
+    sigma = 1e-4
+    walk = 70000 * np.exp(np.cumsum(rng.normal(0, sigma, 30000)))
+    smooth = np.convolve(walk, np.ones(30) / 30, mode="valid")
+    one = ewma_vol(smooth, halflife_s=1e9, floor=1e-9, step=1)
+    sixty = ewma_vol(smooth, halflife_s=1e9, floor=1e-9, step=60)
+    assert one < 0.3 * sigma
+    assert sixty == pytest.approx(sigma, rel=0.2)
+
+
 def test_ewma_vol_floor():
     assert ewma_vol(np.full(100, 70000.0), floor=2e-5) == 2e-5
 

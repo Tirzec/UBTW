@@ -244,8 +244,53 @@ class BinanceFeed(_WSFeed):
                           size=float(d["q"]), side=-1 if d.get("m") else 1)]
 
 
+class PolymarketUSBrtiFeed(PriceFeed):
+    """CF Benchmarks BRTI (the index Polymarket US BTC markets settle on), polled from
+    Polymarket US's public asset-price API at 1-second resolution. No auth needed.
+
+    Note: these 1s candles closely track, but are not byte-identical to, the 60 official
+    BRTI samples used for settlement (checked 2026-11-09: within ~$1-10). The bot uses the
+    officially published price to beat, and BRTI only to estimate where the price is heading."""
+
+    type_name = "polymarket_us_brti"
+    produces = ("spot",)
+
+    def __init__(self, conf, role, secrets=None, health_conf=None):
+        super().__init__(conf, role, secrets, health_conf)
+        self._last_ts = 0
+
+    @staticmethod
+    def parse_history(d: dict, now: float, after_ts: int, name: str) -> list[PriceTick]:
+        out = []
+        for s in d.get("series", []):
+            for c in s.get("candles", []):
+                ts = int(c["timestamp"])
+                if ts > after_ts and c.get("close") is not None:
+                    out.append(PriceTick(name, "spot", float(c["close"]), float(ts), now))
+        return sorted(out, key=lambda t: t.ts)
+
+    async def stream(self, emit: Callable[[PriceTick], None]) -> None:
+        import httpx
+
+        url = self.conf.get("url", "https://gateway.polymarket.us/v1/asset-prices/history")
+        every = float(self.conf.get("poll_interval_s", 1.0))
+        async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "btc-signals/1.0"}) as client:
+            while True:
+                now = time.time()
+                r = await client.get(url, params={"assets": self.conf.get("asset", "crypto:btc"),
+                                                  "bucket": "ASSET_PRICE_BUCKET_1S",
+                                                  "from": int(now) - 15, "to": int(now)})
+                r.raise_for_status()
+                self.mark_message()
+                for t in self.parse_history(r.json(), time.time(), self._last_ts, self.name):
+                    self._last_ts = int(t.ts)
+                    emit(t)
+                await asyncio.sleep(max(0.2, every - (time.time() - now)))
+
+
 FEED_TYPES: dict[str, type[PriceFeed]] = {
-    c.type_name: c for c in (PolymarketRTDSFeed, PolyBoltFeed, CoinbaseFeed, KrakenFeed, BinanceFeed)
+    c.type_name: c for c in (PolymarketRTDSFeed, PolyBoltFeed, CoinbaseFeed, KrakenFeed, BinanceFeed,
+                             PolymarketUSBrtiFeed)
 }
 
 

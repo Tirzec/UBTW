@@ -38,7 +38,7 @@ cd btc-signals
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env            # optional: Polymarket API keys for the PolyBolt feed
-python -m pytest                # 101 tests, about 1 s
+python -m pytest                # 114 tests, about 2 s
 python -m app.main              # open http://127.0.0.1:8000
 ```
 
@@ -64,13 +64,65 @@ and Gamma only publishes it after the window closes. Windows already running at 
 "price to beat unknown" (NO TRADE) unless the previous window's official final price is out.
 
 ### Network hosts used
-Polymarket: `gamma-api.polymarket.com`, `clob.polymarket.com`, `ws-subscriptions-clob.polymarket.com`,
+Polymarket US: `gateway.polymarket.us`, `api.polymarket.us`.
+Polymarket (intl): `gamma-api.polymarket.com`, `clob.polymarket.com`, `ws-subscriptions-clob.polymarket.com`,
 `ws-live-data.polymarket.com` (RTDS), `ws-live-v2.polymarket.com` (PolyBolt, optional),
 `data-api.polymarket.com` (backtest), `polymarket.com` (display-only cross-check).
 Spot: `ws-feed.exchange.coinbase.com`, `ws.kraken.com`. Derivatives: `api.hyperliquid.xyz`.
 News: CoinDesk, Cointelegraph, Decrypt, The Block RSS. Calendar: `nfs.faireconomy.media`.
 Phone alerts: `ntfy.sh` or `api.telegram.org`.
 Backtest bars: `data-api.binance.vision`. Binance's trading API is geo-blocked in the US and is off by default.
+
+---
+
+## Exchanges: Polymarket US (default) or polymarket.com
+
+Set `venue:` in `config.yaml`.
+
+| | `polymarket_us` (default) | `polymarket_intl` |
+|---|---|---|
+| Who can use it | US residents, 18+ (19 in AL/NE, 21 in MS), eligible states (not Nevada) | non-US only: blocks US IPs |
+| Regulator | CFTC-regulated exchange | none (crypto, on-chain) |
+| BTC Up/Down windows | 5m, 15m (also 1h, 1d) | 5m, 15m |
+| Settles on | CF Benchmarks **BRTI**: average of 60 one-second prices before open/close; a flat window is **Up** | Chainlink 60s TWAP |
+| Price to beat | published by the exchange (`assetPriceTerms.priceToBeat`) | captured by the app at window start |
+| Taker fee | `0.095 × p × (1−p)` per contract (0.0695 in your first 7 days), read from each market's `feeCoefficient` | `0.07 × p × (1−p)` |
+| Maker fee | 0 (maker-only orders supported) | 0 |
+| Funding | debit card, ACH, Apple Pay, PayPal, Venmo, USDC | USDC/pUSD |
+| Python for LIVE | 3.9+ (requests signed with PyNaCl) | 3.11+ (official SDK) |
+
+How the Polymarket US connection works:
+- Markets are found by slug (`cpc-btc-updown-5m-YYYY-MM-DD-HHMMz`).
+- Order books are polled once a second from the public gateway (no key needed).
+- The live BRTI price comes from the public asset-price API.
+- Only the "Up" contract trades. A Down position is the short side, so a Down order at x is
+  sent as `BUY_SHORT` at 1 − x. The app handles this for you.
+
+Known limitations on Polymarket US:
+- The public 1-second BRTI candles track the official settlement samples closely (within about
+  $1–10), but not exactly. The bot uses the **official published price to beat**, and BRTI only
+  for its estimate.
+- A new 15m window's order book can take about 2 minutes to appear. The bot shows "order book
+  stale" (NO TRADE) until it does.
+- There's no exchange-side dead-man switch. If the app crashes, a resting $5 entry order can
+  stay open until you restart. On startup the bot cancels all open orders, or run
+  `python -m app.trader stop`.
+
+### Going live on Polymarket US
+1. Install the **Polymarket US** app, sign up, and pass identity verification (legal name,
+   address, date of birth, SSN; sometimes a photo ID). Fund it with only what you can afford to lose.
+2. Create an API key at **https://polymarket.us/developer**, signing in the same way as in the
+   app. Copy the **secret key**; it's shown only once.
+3. Put both in `btc-signals/.env` (never anywhere else):
+   ```
+   POLYMARKET_KEY_ID=...
+   POLYMARKET_SECRET_KEY=...
+   ```
+4. Let **paper mode run for 300+ trades on Polymarket US** (`python -m app.trader stats`).
+   Paper trades on the other exchange don't count.
+5. In `config.yaml` set `trading.mode: live` and `trading.live_trading_enabled: true`, then start
+   the app. It checks that your key works (shows your buying power), prints your paper stats and
+   risk limits, and asks you to type `I UNDERSTAND THIS TRADES REAL MONEY`.
 
 ---
 
@@ -378,8 +430,10 @@ app/main.py      FastAPI + websocket web/           dashboard (plain HTML/JS)
 app/notify.py    phone push alerts (ntfy / Telegram)
 app/trading/     auto-trader: rules, risk, paper/live brokers, audit store, live gate
 app/trader.py    kill switch / status CLI
+app/ingest/us_markets.py  Polymarket US discovery, rules check, order books
+app/trading/us_broker.py  Polymarket US live orders (Ed25519-signed REST)
 backtest/        collect / replay / train / report
-tests/           101 tests: features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
+tests/           114 tests: features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
                  parsers and staleness, degraded-data end-to-end, books, model, backtester
 docs/ARCHITECTURE.md   research notes and design
 ```

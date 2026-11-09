@@ -212,3 +212,26 @@ def test_manager_reference_twap_at_boundary():
     feed_tick(fm, "polymarket_rtds", "twap", 74542.42, 1794234000.0)
     assert fm.reference_twap_at(1794234000) == (74542.42, False)
     assert fm.reference_twap_at(1794233000) is None
+
+
+def test_seed_history_fills_spot_series(monkeypatch):
+    import httpx
+
+    candles = [{"timestamp": 1000 + i, "close": str(70000 + i)} for i in range(100)]
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, params=None):
+            return httpx.Response(200, json={"series": [{"candles": candles}]},
+                                  request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    import asyncio
+    fm = FeedManager(CFG)
+    fm.bars["coinbase"].add_trade(1050, 1.0, 1, 1)          # live data wins over seeded data
+    n = asyncio.run(fm.seed_history())
+    assert n == 199                                          # 100 for kraken + 99 for coinbase
+    w = fm.bars["coinbase"].window(1099, 100)
+    assert w.close[0] == 70000 and w.close[50] == 1.0 and w.close[-1] == 70099

@@ -60,6 +60,8 @@ class Window:
     # boundary. It is NOT the resolution price (60s TWAP); it disagreed with the actual
     # outcome in 15 of 138 windows checked on 2026-11-09.
     site_open: float | None = None
+    url: str = ""
+    venue: str = "polymarket_intl"
 
     @property
     def lookback_s(self) -> int:
@@ -82,7 +84,7 @@ class Window:
             "rules_ok": self.rules.ok if self.rules else None,
             "rules_mismatches": self.rules.mismatches if self.rules else ["rules not loaded"],
             "twap_lookback_s": self.lookback_s, "fee_schedule": self.fee_schedule,
-            "url": f"https://polymarket.com/event/{self.slug}",
+            "url": self.url or f"https://polymarket.com/event/{self.slug}", "venue": self.venue,
         }
 
 
