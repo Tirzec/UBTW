@@ -210,6 +210,8 @@ class Engine:
         """{order id: market slug} of every order any trader currently holds open."""
         out = {}
         for t in getattr(self, "traders", {}).values():
+            if t.mode != "live":                       # paper orders never exist on the exchange
+                continue
             for oid, o in t.broker.orders.items():
                 if not o.done:
                     out[oid] = o.token.rsplit(":", 1)[0]

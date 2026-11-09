@@ -164,7 +164,8 @@ def main(argv=None) -> None:
     elif a.command in ("fills", "reconcile"):
         print(asyncio.run(_account_report(cfg, a.command, c)))
     elif a.command == "status":
-        risk = c.execute("SELECT value FROM bot_state WHERE key='risk'").fetchone()
+        key = "live:risk" if (cfg.get("trading", {}) or {}).get("mode") == "live" else "risk"
+        risk = c.execute("SELECT value FROM bot_state WHERE key=?", (key,)).fetchone()
         print("mode:", (cfg.get("trading", {}) or {}).get("mode", "paper"))
         print("risk:", json.dumps(json.loads(risk["value"]) if risk else {}, indent=2))
         for r in c.execute("SELECT * FROM bot_positions WHERE status IN ('opening','open','closing','resolving')"):

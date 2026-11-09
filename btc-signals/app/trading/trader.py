@@ -79,6 +79,8 @@ class AutoTrader:
         from .store import paper_count_from
         self.paper_since = paper_count_from(xc)
         self.risk_key = "risk" if module.name == "crypto_updown" else f"risk:{module.name}"
+        if self.mode == "live":
+            self.risk_key = "live:" + self.risk_key       # paper streaks/pauses never carry into live
         saved = store.get_state(self.risk_key, {}) or {}
         st = RiskState(**{k: v for k, v in saved.items() if k in RiskState.__dataclass_fields__})
         self.risk = RiskManager(xc.get("risk", {}) or {}, st)

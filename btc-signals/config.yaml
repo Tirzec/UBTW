@@ -158,9 +158,9 @@ paper:                              # signal log: every signal as a $50 hypothet
 # ---------------------------------------------------------------------------
 trading:
   enabled: true
-  mode: paper                      # paper | live
-  live_trading_enabled: false      # second, explicit switch for live
-  min_paper_trades_for_live: 300
+  mode: live                       # paper | live   (LIVE: user's explicit choice, 2026-11-09, option 3)
+  live_trading_enabled: true       # second, explicit switch for live
+  min_paper_trades_for_live: 0     # was 300; waived by the user on 2026-11-09 (crypto only, phase-1 caps)
   paper_count_from: "2026-11-09T22:28:00Z"   # after the order-book cache fix: only paper trades opened after this count
   live_phase: 1                    # first live phase: hard caps in app/trading/live_phase.py
                                    # ($1 stake, $10/day loss, 10 live trades/day; config can only lower them)
