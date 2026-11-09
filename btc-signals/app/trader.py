@@ -88,6 +88,9 @@ def main(argv=None) -> None:
     a = ap.parse_args(argv)
     from .console import safe_console
     safe_console()
+    if a.command != "stop":               # the kill switch must always work
+        from .env_guard import check_env_safety
+        check_env_safety()
     cfg = load_config()
     c = _db(cfg)
     if a.command == "stop":

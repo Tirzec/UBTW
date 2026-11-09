@@ -180,6 +180,9 @@ def main(argv: list[str] | None = None) -> None:
 
     from .console import safe_console
     safe_console()
+    from .env_guard import check_env_safety
+    for w in check_env_safety():          # raises (refuses to start) if .env is tracked by git
+        print(f"  WARNING: {w}", flush=True)
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")

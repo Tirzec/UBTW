@@ -130,6 +130,8 @@ Known limitations on Polymarket US:
    POLYMARKET_KEY_ID=...
    POLYMARKET_SECRET_KEY=...
    ```
+   `.env` is in `.gitignore`, and both values are masked in every log. **The app refuses to start
+   if `.env` (or any `.env.*`, `*.pem`, `*.key`) is tracked by git**, and tells you how to untrack it.
 4. Let **paper mode run for 300+ trades on Polymarket US** (`python -m app.trader stats`).
    Paper trades on the other exchange don't count.
 5. In `config.yaml` set `trading.mode: live` and `trading.live_trading_enabled: true`, then start
