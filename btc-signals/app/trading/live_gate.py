@@ -14,7 +14,7 @@ CONFIRM_PHRASE = "I UNDERSTAND THIS TRADES REAL MONEY"
 
 
 def paper_record(db_path: str, venue: str = "polymarket_intl",
-                 module: str = "crypto_updown") -> tuple[int, dict]:
+                 module: str = "crypto_updown", since: float = 0.0) -> tuple[int, dict]:
     """Closed paper trades ON THIS VENUE and MODULE (practice on one exchange doesn't count for the
     other, and sports trades don't count toward the crypto requirement)."""
     c = sqlite3.connect(db_path)
@@ -31,7 +31,7 @@ def paper_record(db_path: str, venue: str = "polymarket_intl",
     else:
         rows = c.execute("SELECT * FROM bot_positions WHERE mode='paper' AND status='closed' "
                          "ORDER BY closed_ts") if venue == "polymarket_intl" else []
-    rows = [dict(r) for r in rows]
+    rows = [dict(r) for r in rows if (dict(r).get("opened_ts") or 0) >= since]
     c.close()
     return len(rows), bot_stats(rows)
 
@@ -78,7 +78,8 @@ def check_live_gates(cfg: dict, db_path: str, *, interactive: bool = True,
     tc = cfg.get("trading", {}) or {}
     venue = (cfg.get("venue") or "polymarket_intl").strip()
     need = int(tc.get("min_paper_trades_for_live", 300))
-    n, stats = paper_record(db_path, venue)
+    from .store import paper_count_from
+    n, stats = paper_record(db_path, venue, since=paper_count_from(tc))
     problems: list[str] = []
     if not tc.get("live_trading_enabled", False):
         problems.append("trading.live_trading_enabled is not true in config.yaml")

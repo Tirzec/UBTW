@@ -161,6 +161,7 @@ trading:
   mode: paper                      # paper | live
   live_trading_enabled: false      # second, explicit switch for live
   min_paper_trades_for_live: 300
+  paper_count_from: "2026-11-09T21:25:00Z"   # entry/exit fix: only paper trades opened after this count
   log_file: data/trader.log
   balance_check_s: 30
   entry:
@@ -173,11 +174,16 @@ trading:
     late_entry_min_edge: 0.12      # ...unless the edge is at least this
     reentry_cooldown_s: 20         # one position per window at a time; wait after closing
     max_entries_per_window: 2      # at most this many trades in any one window
+    # don't buy what loses money the moment it fills (sold straight back at the bid):
+    max_spread: 0.02               # skip if ask - bid is wider than 2 cents
+    min_price: 0.10                # skip contracts under 10c / over 90c: one 1c tick is >10% there
+    max_price: 0.90
+    min_edge_after_exit_cost: 0.01 # fair - price - (price - bid) - exit fee must be >= 1c per share
   exits:
     check_interval_s: 1
     take_profit_pct: 0.08          # sell at +8% after fees (sellable at the current bid)
     stop_loss_pct: 0.10            # sell at -10% after fees
-    stop_loss_grace_s: 0           # optional: for N s after a fill only hard_stop_pct applies
+    stop_loss_grace_s: 45          # for 45 s after a fill only hard_stop_pct (and take profit) apply
     hard_stop_pct: 0.25            #   (spread + exit fee alone can be ~-10% right after a fill)
     flip_threshold: 0.50           # sell if model P(our side wins) drops below this
     time_exit_s_5m: 20             # final hold-or-sell decision this long before close

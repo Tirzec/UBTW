@@ -389,16 +389,18 @@ def check_risk(cfg: dict, buying_power: float | None) -> list[Check]:
 def check_paper(cfg: dict) -> list[Check]:
     from .db import DB
     from .trading.live_gate import format_stats
-    from .trading.store import TradeStore, bot_stats
+    from .trading.store import TradeStore, bot_stats, paper_count_from
     db = DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db")))
     out = []
-    for module, label, need in (
-            ("crypto_updown", "crypto", int((cfg.get("trading", {}) or {}).get("min_paper_trades_for_live", 300))),
-            ("sports", "sports", int((cfg.get("sports", {}) or {}).get("min_paper_trades_for_live", 200)))):
-        rows = TradeStore(db, "paper", "polymarket_us", module).closed_positions()
+    for module, label, conf in (("crypto_updown", "crypto", cfg.get("trading", {}) or {}),
+                                ("sports", "sports", cfg.get("sports", {}) or {})):
+        need = int(conf.get("min_paper_trades_for_live", 300 if module == "crypto_updown" else 200))
+        since = paper_count_from(conf)
+        rows = TradeStore(db, "paper", "polymarket_us", module).counted_paper_trades(since)
         n = len(rows)
+        frm = f" since {time.strftime('%Y-%m-%d %H:%M', time.localtime(since))}" if since else ""
         out.append(Check(f"paper trades ({label})", "PASS" if n >= need else "FAIL",
-                         f"{n} / {need} closed paper trades on Polymarket US",
+                         f"{n} / {need} closed paper trades on Polymarket US{frm}",
                          format_stats(n, bot_stats(rows)).splitlines() if n else []))
     return out
 

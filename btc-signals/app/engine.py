@@ -171,7 +171,9 @@ class Engine:
         from .trading.store import TradeStore
         from .trading.trader import AutoTrader
         need = int(sc.get("min_paper_trades_for_live", 200))
-        paper_done = len(TradeStore(self.db, "paper", self.venue, "sports").closed_positions())
+        from .trading.store import paper_count_from
+        paper_done = len(TradeStore(self.db, "paper", self.venue, "sports").counted_paper_trades(
+            paper_count_from(sc)))
         mode = "paper"
         if self.trade_mode == "live" and sc.get("live_enabled", False):
             if paper_done >= need:

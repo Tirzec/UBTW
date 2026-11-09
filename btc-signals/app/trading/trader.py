@@ -26,6 +26,34 @@ log = logging.getLogger("trader")
 ACTIVE = ("opening", "open", "closing", "resolving")
 
 
+def entry_cost_guard(ec: dict, *, plan_price: float, fair: float | None, best_bid: float | None,
+                     best_ask: float | None, fee_schedule: dict | None) -> str:
+    """Skip entries that lose money the moment they fill (all limits optional, set per module).
+
+    max_spread                 skip if best ask - best bid is wider than this
+    min_price / max_price      skip very cheap / very expensive contracts (one tick is a huge %)
+    min_edge_after_exit_cost   fair - entry price - (entry - bid) - exit fee per share must be >= this:
+                               the edge has to survive selling straight back at the bid.
+    Returns the reason to skip, or "" to go ahead."""
+    from ..fees import fee_per_share
+    if "max_spread" in ec and best_bid is not None and best_ask is not None \
+            and best_ask - best_bid > float(ec["max_spread"]) + 1e-9:
+        return f"spread {best_ask - best_bid:.2f} > {float(ec['max_spread']):.2f}"
+    if "min_price" in ec and plan_price < float(ec["min_price"]) - 1e-9:
+        return f"price {plan_price:.2f} < {float(ec['min_price']):.2f} (one tick is too large a share)"
+    if "max_price" in ec and plan_price > float(ec["max_price"]) + 1e-9:
+        return f"price {plan_price:.2f} > {float(ec['max_price']):.2f}"
+    if "min_edge_after_exit_cost" in ec:
+        if fair is None or best_bid is None:
+            return "no bid to price the exit cost"
+        exit_cost = max(0.0, plan_price - best_bid) + fee_per_share(best_bid, fee_schedule)
+        net = fair - plan_price - exit_cost
+        if net < float(ec["min_edge_after_exit_cost"]) - 1e-9:
+            return (f"edge {fair - plan_price:+.3f} doesn't cover selling back at the bid "
+                    f"({exit_cost:.3f}/share)")
+    return ""
+
+
 class AutoTrader:
     """One executor per strategy module. All modules share this order lifecycle, the audit
     log, the kill switch and (through GlobalRisk) the combined loss/exposure limits."""
@@ -48,6 +76,8 @@ class AutoTrader:
         self.global_risk = global_risk
         self.min_paper = int(min_paper_trades if min_paper_trades is not None
                              else self.tc.get("min_paper_trades_for_live", 300))
+        from .store import paper_count_from
+        self.paper_since = paper_count_from(xc)
         self.risk_key = "risk" if module.name == "crypto_updown" else f"risk:{module.name}"
         saved = store.get_state(self.risk_key, {}) or {}
         st = RiskState(**{k: v for k, v in saved.items() if k in RiskState.__dataclass_fields__})
@@ -261,6 +291,13 @@ class AutoTrader:
         if not plan.ok:
             self.status_note = f"{sig.label} {side} signal skipped: {plan.reason}"
             return
+        why = entry_cost_guard(self.ec, plan_price=plan.price, fair=sig.fair_prob,
+                               best_bid=book["bids"][0][0] if book["bids"] else None,
+                               best_ask=book["asks"][0][0] if book["asks"] else None,
+                               fee_schedule=m.fee_schedule)
+        if why:
+            self.status_note = f"{sig.label} {side} signal skipped: {why}"
+            return
         pid = self.store.new_position(slug=sig.market_id, duration=sig.label, side=side, token=token,
                                       condition_id=m.condition_id, status="opening",
                                       entry_price=plan.price, p_model=sig.fair_prob, edge=sig.edge,
@@ -436,7 +473,7 @@ class AutoTrader:
             end = m.hold_phase_from if m else None
             positions.append({**p, "seconds_left": round(end - now, 1) if end else None})
         closed = self.store.closed_positions()
-        paper_n = len(self.store.closed_positions(mode="paper"))
+        paper_n = len(self.store.counted_paper_trades(self.paper_since))
         day_start = time.mktime(time.strptime(local_day(now), "%Y-%m-%d"))
         return {
             "module": self.module.name,
@@ -447,6 +484,7 @@ class AutoTrader:
                                                                        if c["closed_ts"] >= day_start]),
             "paper_trades_done": paper_n,
             "paper_trades_required": self.min_paper,
+            "paper_count_from": self.paper_since,
             "settings": {"stake": min(float(self.ec.get("stake_usd", 5)), self.risk.max_stake),
                          "order_style": self.ec.get("order_style", "maker"),
                          "take_profit_pct": float(self.xc.get("take_profit_pct", 0.08)),

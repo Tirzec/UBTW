@@ -39,6 +39,16 @@ SECRET_ENV = ("POLYMARKET_PRIVATE_KEY", "POLYMARKET_SECRET_KEY", "POLYMARKET_KEY
 _HEX_KEY = re.compile(r"\b(0x)?[0-9a-fA-F]{64}\b")
 
 
+def paper_count_from(conf: dict | None) -> float:
+    """`paper_count_from` (ISO time) in a module's config: paper trades opened before it don't
+    count toward the live requirement (set when the strategy changes). 0 = count everything."""
+    v = (conf or {}).get("paper_count_from")
+    if not v:
+        return 0.0
+    from datetime import datetime
+    return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+
+
 class RedactSecrets(logging.Filter):
     """Masks private keys / API secrets in every log record, wherever they come from."""
 
@@ -150,6 +160,10 @@ class TradeStore:
                              "AND COALESCE(module,'crypto_updown')=? "
                              "AND status='closed' AND closed_ts>=? ORDER BY closed_ts LIMIT ?",
                              (mode or self.mode, self.venue, self.module, since, limit))
+
+    def counted_paper_trades(self, since: float = 0.0) -> list[dict]:
+        """Closed PAPER trades opened at/after `since` (the live-readiness count)."""
+        return [p for p in self.closed_positions(mode="paper") if (p.get("opened_ts") or 0) >= since]
 
     # ---------------------------------------------------------------- state
     def get_state(self, key: str, default=None):
