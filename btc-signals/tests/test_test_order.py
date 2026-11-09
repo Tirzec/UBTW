@@ -19,7 +19,9 @@ class FakeExchange:
     """Long-side book bid 0.48 / ask 0.50. Maker orders far from the market rest; IOC orders
     fill against the book. Commission per fill: 0.095*q*p*(1-p), banker's-rounded to the cent."""
 
-    def __init__(self, ask_qty=100.0, bid_qty=100.0, report_fill_late=False):
+    def __init__(self, ask_qty=100.0, bid_qty=100.0, report_fill_late=False, invisible_reads=2,
+                 never_appears=False):
+        self.invisible_reads, self.never = invisible_reads, never_appears
         self.orders, self.n, self.calls = {}, 0, []
         self.ask_qty, self.bid_qty = ask_qty, bid_qty
         self.late = report_fill_late
@@ -32,8 +34,9 @@ class FakeExchange:
         if p == "/v1/account/balances":
             return httpx.Response(200, json={"balances": [{"currency": "USD", "buyingPower": str(self.balance)}]})
         if p == "/v1/orders/open" and req.method == "GET":
-            return httpx.Response(200, json={"orders": [o for o in self.orders.values()
-                                                        if o["state"] in ("ORDER_STATE_NEW",)]})
+            return httpx.Response(200, json={"orders": [] if self.never else
+                                             [{k: v for k, v in o.items() if not k.startswith("_")}
+                                              for o in self.orders.values() if o["state"] == "ORDER_STATE_NEW"]})
         if p == "/v1/orders" and req.method == "POST":
             self.n += 1
             oid = f"o{self.n}"
@@ -63,6 +66,9 @@ class FakeExchange:
             return httpx.Response(200, json={})
         if p.startswith("/v1/order/"):
             o = self.orders[p.split("/")[3]]
+            o["_reads"] = o.get("_reads", 0) + 1
+            if self.never or o["_reads"] <= self.invisible_reads:      # created asynchronously
+                return httpx.Response(404, json={"code": 5, "message": "Order not found", "details": []})
             o["_polls"] += 1
             if "_fill" in o and o["_polls"] >= 2:          # fill shows up on the 2nd read
                 o.update(o.pop("_fill"))
@@ -80,7 +86,12 @@ class FakeExchange:
 
 def _setup(ex, monkeypatch):
     monkeypatch.setattr(T.asyncio, "sleep", _nosleep)
-    monkeypatch.setattr(T.time, "time", lambda: NOW_FIXED)
+    tick = [NOW_FIXED]
+
+    def fake_time():                 # a clock that moves 50 ms per read, so timeouts still expire
+        tick[0] += 0.05
+        return tick[0]
+    monkeypatch.setattr(T.time, "time", fake_time)
     broker = UsLiveBroker("kid", SECRET, lambda t: {"rate": 0.095, "exponent": 1, "round_cents": True},
                           client=httpx.AsyncClient(transport=httpx.MockTransport(ex.api)), base="https://api.t")
     gw = httpx.AsyncClient(transport=httpx.MockTransport(ex.gateway))
@@ -157,3 +168,15 @@ def test_part2_cost_cap(tmp_path, monkeypatch):
     with pytest.raises(T.Abort, match="above the"):
         _run(ex, monkeypatch, fill=True, qty=5, confirm=lambda _: "y", input_fn=lambda _: T.FILL_PHRASE,
              db=str(tmp_path / "d.db"))
+
+
+def test_broker_waits_for_async_order_then_gives_up(monkeypatch):
+    """GET answers 404 'Order not found' right after create; the broker waits instead of failing.
+    An order that never shows up (and isn't in open orders) is reported rejected, not 'live' forever."""
+    ex = FakeExchange(never_appears=True)
+    broker, _ = _setup(ex, monkeypatch)
+    o = asyncio.run(broker.place_limit(token="cpc-x:long", side="BUY", price=0.01, size=0.01, post_only=True))
+    assert o.status == "live" and not o.done                      # unknown yet: treated as open
+    o.created = T.time.time() - 11                                # 11 s later, still never seen
+    o = asyncio.run(broker.poll(o.order_id))
+    assert o.status == "rejected" and "never appeared" in o.error

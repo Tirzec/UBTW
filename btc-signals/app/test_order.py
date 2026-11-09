@@ -92,11 +92,19 @@ async def pick_market(gw: httpx.AsyncClient, cfg: dict, prefer: str, now: float 
 
 
 async def open_order_ids(broker) -> set:
-    d = await broker._req("GET", "/v1/orders/open")
-    items = d.get("orders") if isinstance(d, dict) else d
-    if not isinstance(items, list):
-        items = next((v for v in (d or {}).values() if isinstance(v, list)), []) if isinstance(d, dict) else []
-    return {str(o.get("id") or o.get("orderId") or "") for o in items}
+    return await broker.open_order_ids()
+
+
+async def cancel_new_orders(broker, known: set) -> None:
+    """Emergency cleanup: cancel every order this run created that may still be open."""
+    for oid, o in list(broker.orders.items()):
+        if oid in known or o.done:
+            continue
+        try:
+            o = await broker.cancel(oid)
+            print(f"cleanup: order {oid} -> {o.status}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"!! cleanup could not cancel {oid} ({e}). Cancel it in the Polymarket app NOW.", flush=True)
 
 
 async def settle(broker, o, timeout: float = 6.0, poll_s: float = 0.4):
@@ -196,7 +204,9 @@ async def part2(broker, gw, w, qty: float, rep: Report, store=None, input_fn=inp
         rep.step("FAIL", f"buy rejected: {buy.error}")
         return {}
     if not buy.done:
-        rep.step("FAIL", f"buy order {buy.order_id} still not finished after 6 s; check the Polymarket app")
+        buy = await broker.cancel(buy.order_id)
+        rep.step("FAIL", f"buy order {buy.order_id} was still not finished after 6 s; cancel sent "
+                         f"(status {buy.status}, filled {buy.filled:g}). Check the Polymarket app")
         return {}
     if not buy.filled:
         rep.step("WARN", "buy did not fill (the ask moved away); nothing to sell, no money spent")
@@ -289,14 +299,19 @@ async def run(cfg: dict, *, fill: bool, qty: float | None, prefer: str, confirm=
             rep.step("INFO", f"you already have {len(before)} open order(s); the test leaves them alone")
         if store:
             store.event("test_order", f"start on {w.slug} qty {q} fill={fill}", "WARNING")
-        await part1(broker, w, bids, asks, q, rep, store, confirm)
+        known = set(broker.orders)
         result = {}
-        if fill:
-            if not rep.ok:
-                raise Abort("PART 1 had a failure, so PART 2 (the real fill) was not attempted")
-            max_cost = float(((cfg.get("trading", {}) or {}).get("risk", {}) or {}).get("max_stake_usd", 1))
-            result = await part2(broker, gw, w, q, rep, store, input_fn, max_cost=max_cost)
-            print_fill_report(result)
+        try:
+            await part1(broker, w, bids, asks, q, rep, store, confirm)
+            if fill:
+                if not rep.ok:
+                    raise Abort("PART 1 had a failure, so PART 2 (the real fill) was not attempted")
+                max_cost = float(((cfg.get("trading", {}) or {}).get("risk", {}) or {}).get("max_stake_usd", 1))
+                result = await part2(broker, gw, w, q, rep, store, input_fn, max_cost=max_cost)
+                print_fill_report(result)
+        except BaseException:
+            await cancel_new_orders(broker, known)
+            raise
         after = await broker.balance()
         if after is not None and bal is not None:
             print(f"\nbuying power before ${bal:,.4f}, after ${after:,.4f} (change {after - bal:+.4f})")

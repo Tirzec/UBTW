@@ -12,6 +12,7 @@ Fees are read from the exchange's own commissionNotionalTotalCollected on each o
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -125,6 +126,11 @@ class UsLiveBroker:
         self.client = client or httpx.AsyncClient(timeout=10)
         self.base = base
         self.orders: dict[str, OrderState] = {}
+        # Orders are created asynchronously: right after POST /v1/orders, GET /v1/order/{id} can
+        # answer 404 "Order not found" for a moment. Track which orders the exchange has shown us.
+        self._seen: set[str] = set()
+        self.visibility_timeout_s = 10.0
+        self.visibility_poll_s = 0.4
 
     async def _req(self, method: str, path: str, body: dict | None = None) -> dict:
         try:
@@ -156,21 +162,55 @@ class UsLiveBroker:
                 self.orders[o.order_id] = o
                 return o
             raise
-        o.order_id = str(d.get("id") or "")
+        o.order_id = str(d.get("id") or d.get("orderId") or "")
         if not o.order_id:
             raise BrokerError(f"no order id in response: {d}")
         self.orders[o.order_id] = o
-        return await self.poll(o.order_id)
+        return await self.wait_visible(o.order_id, 3.0)
+
+    async def wait_visible(self, order_id: str, timeout: float) -> OrderState:
+        """Poll until the exchange shows the order (or it is finished), up to `timeout` s."""
+        o = await self.poll(order_id)
+        deadline = time.time() + timeout
+        while order_id not in self._seen and not o.done and time.time() < deadline:
+            await asyncio.sleep(self.visibility_poll_s)
+            o = await self.poll(order_id)
+        return o
 
     async def poll(self, order_id: str) -> OrderState:
         o = self.orders[order_id]
         if o.done:
             return o
-        d = await self._req("GET", f"/v1/order/{order_id}")
+        try:
+            d = await self._req("GET", f"/v1/order/{order_id}")
+        except BrokerError as e:
+            if "404" not in str(e) and "not found" not in str(e).lower():
+                raise
+            if order_id in self._seen or time.time() - o.created < self.visibility_timeout_s:
+                return o                          # not visible yet: still treated as live (not done)
+            # never appeared: only call it gone if it's also absent from the open-orders list
+            if order_id in await self.open_order_ids():
+                self._seen.add(order_id)
+                return o
+            o.status = "rejected"
+            o.error = o.error or "order never appeared on the exchange (not accepted)"
+            return o
+        self._seen.add(order_id)
         return apply_order_status(o, d.get("order") or d)
+
+    async def open_order_ids(self) -> set:
+        d = await self._req("GET", "/v1/orders/open")
+        items = d.get("orders") if isinstance(d, dict) else d
+        if not isinstance(items, list):
+            items = next((v for v in d.values() if isinstance(v, list)), []) if isinstance(d, dict) else []
+        return {str(x.get("id") or x.get("orderId") or "") for x in items}
 
     async def cancel(self, order_id: str) -> OrderState:
         o = self.orders[order_id]
+        if order_id not in self._seen and not o.done:
+            o = await self.wait_visible(order_id, self.visibility_timeout_s)   # can't cancel what isn't there yet
+            if o.done:
+                return o
         slug, _ = split_token(o.token)
         try:
             await self._req("POST", f"/v1/order/{order_id}/cancel", {"marketSlug": slug})
