@@ -14,10 +14,11 @@ import asyncio
 import logging
 import time
 
-from ..ingest.discovery import DURATION_SECONDS
+import json
+
 from .broker import BrokerError, Maintenance, OrderState
 from .risk import RiskManager, RiskState, local_day
-from .rules import evaluate_bot_exit, plan_entry, round_price, trigger_levels, value_position
+from .rules import plan_entry, round_price, trigger_levels, value_position
 from .store import TradeStore, bot_stats
 
 log = logging.getLogger("trader")
@@ -26,18 +27,34 @@ ACTIVE = ("opening", "open", "closing", "resolving")
 
 
 class AutoTrader:
-    def __init__(self, engine, cfg: dict, broker, store: TradeStore):
+    """One executor per strategy module. All modules share this order lifecycle, the audit
+    log, the kill switch and (through GlobalRisk) the combined loss/exposure limits."""
+
+    def __init__(self, engine, cfg: dict, broker, store: TradeStore, module=None,
+                 exec_conf: dict | None = None, global_risk=None, min_paper_trades: int | None = None):
         self.engine = engine
         self.cfg = cfg
         self.tc = cfg.get("trading", {}) or {}
-        self.ec = self.tc.get("entry", {}) or {}
-        self.xc = self.tc.get("exits", {}) or {}
+        if module is None:
+            from ..modules.crypto_updown import CryptoUpDownModule
+            module = CryptoUpDownModule(engine, cfg)
+        self.module = module
+        xc = exec_conf if exec_conf is not None else self.tc
+        self.ec = xc.get("entry", {}) or {}
+        self.xc = xc.get("exits", {}) or {}
         self.broker = broker
         self.mode = broker.mode
         self.store = store
-        saved = store.get_state("risk", {}) or {}
+        self.global_risk = global_risk
+        self.min_paper = int(min_paper_trades if min_paper_trades is not None
+                             else self.tc.get("min_paper_trades_for_live", 300))
+        self.risk_key = "risk" if module.name == "crypto_updown" else f"risk:{module.name}"
+        saved = store.get_state(self.risk_key, {}) or {}
         st = RiskState(**{k: v for k, v in saved.items() if k in RiskState.__dataclass_fields__})
-        self.risk = RiskManager(self.tc.get("risk", {}) or {}, st)
+        self.risk = RiskManager(xc.get("risk", {}) or {}, st)
+        self._last_resume_seen = float(store.get_state("resume_requested") or 0)
+        if global_risk is not None:
+            global_risk.register(self)
         self._recompute_day()
         self.orders: dict[str, OrderState] = {}
         self.last_close: dict[str, float] = {}
@@ -59,11 +76,13 @@ class AutoTrader:
         self.risk.state.day_trades = len(rows)
 
     def _save(self) -> None:
-        self.store.set_state("risk", {k: v for k, v in self.risk.state.__dict__.items()
-                                      if k != "api_errors"})
+        self.store.set_state(self.risk_key, {k: v for k, v in self.risk.state.__dict__.items()
+                                             if k != "api_errors"})
 
     def _alert(self, title: str, body: str = "", level: str = "info", kind: str = "trade") -> None:
-        self.engine.alert(kind, f"[{self.mode.upper()}] {title}", body, level)
+        tag = self.mode.upper() if self.module.name == "crypto_updown" else \
+            f"{self.mode.upper()} {self.module.name}"
+        self.engine.alert(kind, f"[{tag}] {title}", body, level)
 
     # ------------------------------------------------------------ control
     async def kill(self, reason: str = "STOP pressed") -> int:
@@ -156,8 +175,9 @@ class AutoTrader:
         req = self.store.get_state("kill_requested")
         if req and not (self.risk.state.halted and self.risk.state.halt_reason.startswith("KILL")):
             await self.kill("STOP from command line")
-        if self.store.get_state("resume_requested"):
-            self.store.set_state("resume_requested", None)
+        rr = float(self.store.get_state("resume_requested") or 0)
+        if rr > self._last_resume_seen:          # every module sees a resume request once
+            self._last_resume_seen = rr
             self.resume()
         await self._housekeeping(now)
         if self.risk.exits_allowed():
@@ -168,14 +188,14 @@ class AutoTrader:
                     self.risk.state.maintenance_until = now + m.retry_after
                 except BrokerError as e:
                     self._api_error(f"position {p['id']}", e)
-        for dur in self.engine.durations:
+        for sig in self.module.signals(now):
             try:
-                await self._maybe_enter(dur, now)
+                await self._maybe_enter(sig, now)
             except Maintenance as m:
                 self.risk.state.maintenance_until = now + m.retry_after
                 self.store.event("maintenance", str(m), "WARNING")
             except BrokerError as e:
-                self._api_error(f"entry {dur}", e)
+                self._api_error(f"entry {sig.label}", e)
         self._save()
 
     async def _housekeeping(self, now: float) -> None:
@@ -217,47 +237,45 @@ class AutoTrader:
             return True
         return now - self.last_close.get(slug, 0) < float(self.ec.get("reentry_cooldown_s", 20))
 
-    async def _maybe_enter(self, dur: str, now: float) -> None:
-        ev = self.engine.evals.get(dur)
-        w = self.engine.discovery.current(dur, now)
-        if ev is None or ev.window.slug != w.slug or ev.decision is None or ev.p_up is None:
+    async def _maybe_enter(self, sig, now: float) -> None:
+        m = self.module.market(sig.market_id)
+        if m is None or (m.entry_deadline is not None and now >= m.entry_deadline):
             return
-        d = ev.decision
-        if d.action not in ("UP", "DOWN"):
-            return                                   # existing signal logic says NO TRADE
-        left = w.end - now
-        late = float(self.ec.get(f"no_entry_last_s_{dur}", 60 if dur == "5m" else 120))
-        if left < late and (d.edge or 0) < float(self.ec.get("late_entry_min_edge", 0.12)):
-            return
-        stake = min(float(self.ec.get("stake_usd", 5)), self.risk.max_stake)
+        stake = min(float(sig.stake_usd or self.ec.get("stake_usd", 5)), self.risk.max_stake)
+        active = self.store.active_positions()
         blockers = self.risk.entry_blockers(now=now, stake=stake, open_exposure=self._exposure(),
-                                            window_busy=self._window_busy(w.slug, now),
-                                            degraded=self.engine.feeds.quality.state.degraded)
+                                            window_busy=self._window_busy(sig.market_id, now),
+                                            degraded=self.module.degraded())
+        blockers += self.module.entry_blockers(sig, active, now)
+        if self.global_risk is not None:
+            blockers += self.global_risk.entry_blockers(now, stake)
         if blockers:
-            self.status_note = f"{dur} {d.action} signal skipped: {blockers[0]}"
+            self.status_note = f"{sig.label} {sig.side} signal skipped: {blockers[0]}"
             return
-        side = d.action
-        token = w.token_up if side == "UP" else w.token_down
-        book = self.engine.clob.store.get(token) or {"bids": [], "asks": []}
+        side, token = sig.side, sig.token
+        book = self.module.book(token) or {"bids": [], "asks": []}
         plan = plan_entry(best_bid=book["bids"][0][0] if book["bids"] else None,
                           best_ask=book["asks"][0][0] if book["asks"] else None, stake_usd=stake,
-                          tick=w.tick_size, min_size=w.min_size,
-                          style=self.ec.get("order_style", "maker"), fee_schedule=w.fee_schedule)
+                          tick=m.tick_size, min_size=m.min_size,
+                          style=self.ec.get("order_style", "maker"), fee_schedule=m.fee_schedule)
         if not plan.ok:
-            self.status_note = f"{dur} {side} signal skipped: {plan.reason}"
+            self.status_note = f"{sig.label} {side} signal skipped: {plan.reason}"
             return
-        p_side = ev.p_up if side == "UP" else 1 - ev.p_up
-        pid = self.store.new_position(slug=w.slug, duration=dur, side=side, token=token,
-                                      condition_id=w.condition_id, status="opening",
-                                      entry_price=plan.price, p_model=p_side, edge=d.edge,
-                                      opened_ts=now)
+        pid = self.store.new_position(slug=sig.market_id, duration=sig.label, side=side, token=token,
+                                      condition_id=m.condition_id, status="opening",
+                                      entry_price=plan.price, p_model=sig.fair_prob, edge=sig.edge,
+                                      opened_ts=now, league=sig.league, group_key=sig.group or sig.market_id,
+                                      bet_type=sig.bet_type, confidence=sig.confidence,
+                                      starts_at=sig.starts_at,
+                                      reasons=json.dumps([r.as_dict() for r in sig.reasons][:5]))
         o = await self.broker.place_limit(token=token, side="BUY", price=plan.price, size=plan.shares,
                                           post_only=plan.post_only)
         self.store.order(o, pid, "entry")
         self.store.update_position(pid, entry_order=o.order_id)
         self.store.event("order", f"BUY {side} {plan.shares:.2f} @ {plan.price:.2f} "
-                         f"({'post-only' if plan.post_only else 'limit'}) {w.slug}", position=pid,
-                         order=o.order_id, status=o.status, edge=round(d.edge, 4), p=round(p_side, 4))
+                         f"({'post-only' if plan.post_only else 'limit'}) {sig.market_id}", position=pid,
+                         order=o.order_id, status=o.status, edge=round(sig.edge, 4),
+                         p=round(sig.fair_prob, 4))
         if o.status == "rejected":
             self.store.update_position(pid, status="void", exit_reason=f"entry rejected: {o.error}",
                                        closed_ts=now)
@@ -284,11 +302,11 @@ class AutoTrader:
             self.store.update_position(p["id"], status="void", exit_reason="entry not filled in time",
                                        closed_ts=time.time())
             return
-        w = self.engine.discovery.windows.get(p["slug"])
+        m = self.module.market(p["slug"])
         tp, sl = trigger_levels(shares=o.filled, cost_basis=o.notional + o.fee,
                                 take_profit_pct=float(self.xc.get("take_profit_pct", 0.08)),
                                 stop_loss_pct=float(self.xc.get("stop_loss_pct", 0.10)),
-                                fee_schedule=w.fee_schedule if w else None)
+                                fee_schedule=m.fee_schedule if m else None)
         self.store.update_position(p["id"], status="open", shares=o.filled, cost=o.notional,
                                    entry_fee=o.fee, entry_price=round(o.avg_price, 6), filled_ts=time.time(),
                                    tp_price=tp, sl_price=sl)
@@ -299,52 +317,38 @@ class AutoTrader:
 
     # ------------------------------------------------------------ exits
     async def _manage(self, p: dict, now: float) -> None:
-        w = self.engine.discovery.windows.get(p["slug"])
+        m = self.module.market(p["slug"])
         if p["status"] == "opening":
             o = await self.broker.poll(p["entry_order"])
             self.store.order(o, p["id"], "entry")
             timeout = float(self.ec.get("order_timeout_s", 8))
-            if o.filled >= o.size - 1e-9 or now - o.created >= timeout or (w and now >= w.end - 5):
+            if o.filled >= o.size - 1e-9 or now - o.created >= timeout or \
+                    (m and m.entry_deadline is not None and now >= m.entry_deadline):
                 await self._finish_entry(p)
             return
         if p["status"] == "closing":
             await self._poll_exit(p, now)
             return
-        if p["status"] == "resolving" or (w and now >= w.end):
-            await self._resolve(p, w, now)
+        if p["status"] == "resolving" or (m and m.hold_phase_from is not None and now >= m.hold_phase_from):
+            await self._resolve(p, now)
             return
-        await self._evaluate_exit(p, w, now)
+        await self._evaluate_exit(p, m, now)
 
     def _fair(self, p: dict) -> tuple[float | None, bool]:
-        ev = self.engine.evals.get(p["duration"])
-        ok = not self.engine.feeds.quality.state.degraded
-        if ev is None or ev.window.slug != p["slug"] or ev.p_up is None:
-            return None, False
-        return (ev.p_up if p["side"] == "UP" else 1 - ev.p_up), ok
+        return self.module.fair(p)
 
-    async def _evaluate_exit(self, p: dict, w, now: float) -> None:
-        book = self.engine.clob.store.get(p["token"]) or {"bids": [], "asks": []}
+    async def _evaluate_exit(self, p: dict, m, now: float) -> None:
+        book = self.module.book(p["token"]) or {"bids": [], "asks": []}
         shares = p["shares"] - (p["exit_shares"] or 0)
         basis = (p["cost"] + p["entry_fee"]) * (shares / p["shares"]) if p["shares"] else 0
         val = value_position(shares=shares, cost_basis=basis, bids=book["bids"],
-                             fee_schedule=w.fee_schedule if w else None)
-        fair, ok = self._fair(p)
-        dur = p["duration"]
-        dec = evaluate_bot_exit(
-            val=val, fair=fair, seconds_left=(w.end - now) if w else 0, entry_price=p["entry_price"],
-            take_profit_pct=float(self.xc.get("take_profit_pct", 0.08)),
-            stop_loss_pct=float(self.xc.get("stop_loss_pct", 0.10)),
-            flip_threshold=float(self.xc.get("flip_threshold", 0.5)),
-            time_exit_s=float(self.xc.get(f"time_exit_s_{dur}", 20 if dur == "5m" else 30)),
-            hold_min_ev=float(self.xc.get("hold_min_ev", 0.02)), model_ok=ok,
-            seconds_since_fill=now - (p["filled_ts"] or now),
-            stop_loss_grace_s=float(self.xc.get("stop_loss_grace_s", 0)),
-            hard_stop_pct=float(self.xc.get("hard_stop_pct", 0.25)))
+                             fee_schedule=m.fee_schedule if m else None)
+        dec = self.module.exit_decision(p, val, now)
         self.store.update_position(p["id"], last_value=val.net, last_pnl=val.pnl,
                                    last_note=dec.reason[:200])
         if dec.action != "SELL" or not book["bids"]:
             return
-        tick = w.tick_size if w else 0.01
+        tick = m.tick_size if m else 0.01
         floor = round_price(max(tick, book["bids"][0][0] - int(self.xc.get("exit_slippage_ticks", 2)) * tick), tick)
         o = await self.broker.place_limit(token=p["token"], side="SELL", price=floor, size=round(shares, 2),
                                           post_only=False)
@@ -382,24 +386,26 @@ class AutoTrader:
         else:
             self.store.update_position(p["id"], status="open")   # retry the rest next tick
 
-    async def _resolve(self, p: dict, w, now: float) -> None:
+    async def _resolve(self, p: dict, now: float) -> None:
         if p["status"] != "resolving":
             self.store.update_position(p["id"], status="resolving")
             self.store.event("resolve", f"holding {p['side']} through close of {p['slug']}", position=p["id"])
-        if w is None or w.outcome is None:
-            return                                   # discovery refreshes until Gamma publishes it
+        per_share = self.module.settlement_per_share(p)
+        if per_share is None:
+            return                                   # module keeps polling the official result
         left = p["shares"] - (p["exit_shares"] or 0)
-        won = w.outcome == p["side"]
-        payout = left * (1.0 if won else 0.0)
-        if self.mode == "live" and won and hasattr(self.broker, "redeem"):
+        payout = left * per_share
+        if self.mode == "live" and per_share > 0 and hasattr(self.broker, "redeem"):
             try:
                 await self.broker.redeem(p["condition_id"])
                 self.store.event("redeem", f"redeemed {left:.2f} winning shares", position=p["id"])
             except Exception as e:  # noqa: BLE001
                 self.store.event("error", f"redeem failed (redeem in the Polymarket app): {e}", "ERROR",
                                  position=p["id"])
+        label = self.module.outcome_label(p) if hasattr(self.module, "outcome_label") else \
+            f"settled at {per_share:.2f}/share"
         self._close(self.store.position(p["id"]), payout=payout, now=now,
-                    reason=f"resolved {w.outcome}", trigger=p.get("exit_trigger") or "resolution")
+                    reason=label, trigger=p.get("exit_trigger") or "resolution")
 
     def _close(self, p: dict, payout: float, now: float, reason: str | None = None,
                trigger: str | None = None) -> None:
@@ -426,19 +432,21 @@ class AutoTrader:
         now = now or time.time()
         positions = []
         for p in self.store.active_positions():
-            w = self.engine.discovery.windows.get(p["slug"])
-            positions.append({**p, "seconds_left": round(w.end - now, 1) if w else None})
+            m = self.module.market(p["slug"])
+            end = m.hold_phase_from if m else None
+            positions.append({**p, "seconds_left": round(end - now, 1) if end else None})
         closed = self.store.closed_positions()
         paper_n = len(self.store.closed_positions(mode="paper"))
         day_start = time.mktime(time.strptime(local_day(now), "%Y-%m-%d"))
         return {
+            "module": self.module.name,
             "mode": self.mode, "risk": self.risk.summary(now), "status_note": self.status_note,
             "balance": self.last_balance, "positions": positions,
             "trades": list(reversed(closed[-50:])),
             "stats_all": bot_stats(closed), "stats_today": bot_stats([c for c in closed
                                                                        if c["closed_ts"] >= day_start]),
             "paper_trades_done": paper_n,
-            "paper_trades_required": int(self.tc.get("min_paper_trades_for_live", 300)),
+            "paper_trades_required": self.min_paper,
             "settings": {"stake": min(float(self.ec.get("stake_usd", 5)), self.risk.max_stake),
                          "order_style": self.ec.get("order_style", "maker"),
                          "take_profit_pct": float(self.xc.get("take_profit_pct", 0.08)),

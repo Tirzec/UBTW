@@ -80,22 +80,35 @@ def setup_trade_log(path: Path) -> None:
 
 
 class TradeStore:
-    def __init__(self, db, mode: str, venue: str = "polymarket_intl"):
+    NEW_COLUMNS = {   # added after v1; older rows get the defaults (crypto, intl)
+        "venue": "TEXT DEFAULT 'polymarket_intl'", "module": "TEXT DEFAULT 'crypto_updown'",
+        "league": "TEXT", "group_key": "TEXT", "bet_type": "TEXT", "confidence": "REAL",
+        "starts_at": "REAL", "reasons": "TEXT", "closing_fair": "REAL", "clv": "REAL",
+    }
+
+    def __init__(self, db, mode: str, venue: str = "polymarket_intl", module: str = "crypto_updown"):
         self.db = db
         self.mode = mode
         self.venue = venue
+        self.module = module
         db.conn.executescript(SCHEMA)
         cols = {r["name"] for r in db.query("PRAGMA table_info(bot_positions)")}
-        if "venue" not in cols:      # older databases: rows before this column are international
-            db.conn.execute("ALTER TABLE bot_positions ADD COLUMN venue TEXT DEFAULT 'polymarket_intl'")
+        for col, typ in self.NEW_COLUMNS.items():
+            if col not in cols:
+                db.conn.execute(f"ALTER TABLE bot_positions ADD COLUMN {col} {typ}")
+        ecols = {r["name"] for r in db.query("PRAGMA table_info(bot_events)")}
+        if "module" not in ecols:
+            db.conn.execute("ALTER TABLE bot_events ADD COLUMN module TEXT")
         db.conn.commit()
         self.log = logging.getLogger("trader")
 
     # ---------------------------------------------------------------- events
     def event(self, kind: str, message: str, level: str = "INFO", **data) -> None:
-        self.db.execute("INSERT INTO bot_events (ts,mode,level,kind,message,data) VALUES (?,?,?,?,?,?)",
-                        (time.time(), self.mode, level, kind, message, json.dumps(data, default=str)))
-        self.log.log(getattr(logging, level, logging.INFO), "[%s] %s %s %s", self.mode.upper(), kind,
+        self.db.execute("INSERT INTO bot_events (ts,mode,level,kind,message,data,module) VALUES (?,?,?,?,?,?,?)",
+                        (time.time(), self.mode, level, kind, message, json.dumps(data, default=str),
+                         self.module))
+        tag = self.mode.upper() if self.module == "crypto_updown" else f"{self.mode.upper()} {self.module}"
+        self.log.log(getattr(logging, level, logging.INFO), "[%s] %s %s %s", tag, kind,
                      message, json.dumps(data, default=str) if data else "")
 
     def order(self, o, position_id: int | None, purpose: str) -> None:
@@ -115,6 +128,7 @@ class TradeStore:
     def new_position(self, **kw) -> int:
         kw.setdefault("mode", self.mode)
         kw.setdefault("venue", self.venue)
+        kw.setdefault("module", self.module)
         return self.db.insert("bot_positions", kw)
 
     def update_position(self, pid: int, **kw) -> None:
@@ -126,13 +140,15 @@ class TradeStore:
 
     def active_positions(self) -> list[dict]:
         return self.db.query("SELECT * FROM bot_positions WHERE mode=? AND COALESCE(venue,'polymarket_intl')=? "
+                             "AND COALESCE(module,'crypto_updown')=? "
                              "AND status IN ('opening','open','closing','resolving') ORDER BY id",
-                             (self.mode, self.venue))
+                             (self.mode, self.venue, self.module))
 
     def closed_positions(self, mode: str | None = None, since: float = 0, limit: int = 100000) -> list[dict]:
         return self.db.query("SELECT * FROM bot_positions WHERE mode=? AND COALESCE(venue,'polymarket_intl')=? "
+                             "AND COALESCE(module,'crypto_updown')=? "
                              "AND status='closed' AND closed_ts>=? ORDER BY closed_ts LIMIT ?",
-                             (mode or self.mode, self.venue, since, limit))
+                             (mode or self.mode, self.venue, self.module, since, limit))
 
     # ---------------------------------------------------------------- state
     def get_state(self, key: str, default=None):

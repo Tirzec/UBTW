@@ -135,3 +135,40 @@ class RiskManager:
                 "max_stake": self.max_stake, "max_exposure": self.max_exposure,
                 "max_consecutive_losses": self.max_consecutive,
                 "day_stopped": bool(s.day_stopped_until and now < s.day_stopped_until)}
+
+
+class GlobalRisk:
+    """Limits across ALL modules: combined daily loss and total open exposure."""
+
+    def __init__(self, conf: dict | None = None):
+        conf = conf or {}
+        self.daily_loss_limit = float(conf.get("daily_loss_limit_usd", 40))
+        self.max_exposure = float(conf.get("max_total_exposure_usd", 60))
+        self.traders: list = []
+
+    def register(self, trader) -> None:
+        self.traders.append(trader)
+
+    def day_pnl(self, now: float) -> float:
+        tot = 0.0
+        for t in self.traders:
+            t.risk.roll_day(now)
+            tot += t.risk.state.day_pnl
+        return tot
+
+    def exposure(self) -> float:
+        return sum(t._exposure() for t in self.traders)
+
+    def entry_blockers(self, now: float, stake: float) -> list[str]:
+        out = []
+        pnl = self.day_pnl(now)
+        if pnl <= -self.daily_loss_limit:
+            out.append(f"combined daily loss {pnl:+.2f} hit the global limit -{self.daily_loss_limit:g}")
+        exp = self.exposure()
+        if exp + stake > self.max_exposure + 1e-9:
+            out.append(f"total exposure ${exp:.2f} + ${stake:.2f} > global max ${self.max_exposure:g}")
+        return out
+
+    def summary(self, now: float) -> dict:
+        return {"day_pnl": round(self.day_pnl(now), 4), "daily_loss_limit": self.daily_loss_limit,
+                "exposure": round(self.exposure(), 4), "max_exposure": self.max_exposure}

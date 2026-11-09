@@ -1,6 +1,6 @@
 # Multi-Market Architecture & Sports Module: Proposal
 
-Status: **proposal, awaiting approval** (no code yet). Researched 2026-11-09 against the live
+Status: **approved with changes (free data sources only)**; see section 5. Being built. Researched 2026-11-09 against the live
 Polymarket US gateway, its docs (docs.polymarket.us), and the data providers below.
 
 ---
@@ -247,3 +247,28 @@ $59 plan.
 5. **Sports execution in paper mode** through the shared executor, with per-game and
    per-league exposure and CLV capture.
 6. **Sports backtest** and CLV/ROI/calibration reports.
+
+
+---
+
+## 5. Decisions (2026-11-09) and verified free tiers
+
+Decisions: **free tiers only**; moneyline + main spread + main total (no props); NFL, NBA, NHL,
+EPL on (others in config, off); at kickoff hold if edge persists, otherwise sell before start;
+default edge buffer **7%** because free odds are delayed; **no entries in the last 15 minutes**
+before start unless the Pinnacle check confirms; CLV from our own recorded closing consensus.
+
+| Provider | Free tier (from the provider's own docs) | Books | Delay | Budget tracking | Role |
+|---|---|---|---|---|---|
+| TheRundown | 20,000 data points/UTC day **and** 200,000/UTC month (first cap hit pauses the key); 1 req/s; no props, no live, 7-day history | DraftKings (19), FanDuel (23), BetMGM (22) | 5 min | `X-Datapoints`, `X-Datapoints-Remaining/Used/Limit/Reset` headers | primary consensus |
+| SharpAPI | 12 requests/min, no monthly cap | DraftKings, FanDuel | 60 s | `X-RateLimit-Remaining` | fresher DK/FD quotes; backup |
+| The Odds API | 500 credits/month; events list free; per-event odds = markets × regions (`bookmakers=pinnacle` = 1 region), so 1 game × 1 market = 1 credit | Pinnacle (EU, "from public website which may incur a delay") | delayed | `x-requests-remaining/used/last` | Pinnacle check only, near kickoff, only when an edge exists |
+
+Cost model: TheRundown charges 2 data points per event + 1 per returned price, so 3 books × main
+moneyline/spread/total ≈ 20 per game. The monthly cap ≈ 6,600/day ≈ 330 game-refreshes a day,
+so the module spends it on a schedule (see `sports.odds.budget` in config): a slow sweep of
+each league, faster refreshes inside 3 hours of start, and a final closing snapshot for CLV.
+
+Merging: for every book, the **newest** quote from any source is used, so SharpAPI's 60s-delayed
+DK/FD replace TheRundown's 5-min-old ones when available; BetMGM comes from TheRundown.
+Consensus = average of the de-vigged probabilities of available books (power method).
