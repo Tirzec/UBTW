@@ -1,0 +1,10 @@
+# Manual additions to the economic calendar. Blackouts apply around each event
+# (calendar.blackout_before_min / blackout_after_min in config.yaml).
+# The weekly feed (calendar.feed_url) already covers USD high-impact releases
+# (CPI, FOMC rate decision, NFP, PCE, GDP, ...). Use this file for anything it misses,
+# e.g. an FOMC press conference or an unscheduled Fed speech. Times are ISO 8601 with offset.
+events: []
+#  - title: FOMC press conference
+#    time: 2026-12-09T14:30:00-05:00
+#    impact: High
+#    country: USD

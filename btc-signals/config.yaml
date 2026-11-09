@@ -1,0 +1,132 @@
+# BTC Up/Down signal app configuration. Secrets go in .env, never here.
+
+server:
+  host: 127.0.0.1
+  port: 8000
+
+db_path: data/signals.db
+
+# ---------------------------------------------------------------------------
+# Price feeds. Every source implements the same PriceFeed interface
+# (app/feeds/base.py). Swap or reorder sources here; no code changes needed.
+#   type: one of polymarket_rtds | polybolt | coinbase | kraken | binance
+# "reference" = the resolution source (Chainlink). Tried in order; the first
+#   healthy one is used. If none are healthy, the app falls back to a
+#   synthetic 60s TWAP built from spot and marks data DEGRADED (NO TRADE).
+# "spot" = exchange trades used for candles, momentum, VWAP, order flow and
+#   as the cross-check against Chainlink. First healthy one is primary.
+# ---------------------------------------------------------------------------
+feeds:
+  reference:
+    - type: polymarket_rtds        # legacy RTDS, no auth, deprecated by Polymarket
+      url: wss://ws-live-data.polymarket.com
+    - type: polybolt               # replacement; needs POLY_API_KEY/SECRET/PASSPHRASE in .env
+      url: wss://ws-live-v2.polymarket.com/ws
+  spot:
+    - type: coinbase
+      url: wss://ws-feed.exchange.coinbase.com
+      symbol: BTC-USD
+      no_price_after_s: 20         # trades can pause; heartbeats prove the socket is alive
+      frozen_after_s: 120
+    - type: kraken
+      url: wss://ws.kraken.com/v2
+      symbol: BTC/USD
+      no_price_after_s: 45         # Kraken BTC/USD prints less often than Coinbase
+      frozen_after_s: 180
+    # - type: binance              # geo-blocked in the US
+    #   url: wss://stream.binance.com:9443/ws
+    #   symbol: btcusdt
+
+  health:
+    # Defaults; any feed entry above can override these per source.
+    stale_after_s: 5               # no message at all (incl. heartbeats) -> not responding
+    no_price_after_s: 5            # no price tick for this long -> stale
+    max_lag_s: 5                   # exchange timestamp older than this -> stale
+    frozen_after_s: 30             # price unchanged for this long -> stale (frozen feed)
+    warn_repeat_s: 60              # repeat the stale warning this often while it lasts
+    reconnect_max_backoff_s: 30
+
+# Chainlink vs spot cross-check. Exceeding any of these -> DEGRADED -> NO TRADE.
+data_quality:
+  max_gap_bps: 15                  # |chainlink - spot median| in basis points
+  gap_persist_s: 3                 # gap must persist this long before tripping
+  recover_after_s: 10              # gap must be back under threshold this long to clear
+  require_two_spot_sources: false  # if true, one spot feed down => degraded
+  max_spot_disagreement_bps: 15    # coinbase vs kraken disagreement => degraded
+
+polymarket:
+  gamma_url: https://gamma-api.polymarket.com
+  clob_url: https://clob.polymarket.com
+  clob_ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
+  data_api_url: https://data-api.polymarket.com
+  # display-only cross-check (Chainlink spot at the boundary; NOT the resolution price)
+  site_price_url: https://polymarket.com/api/crypto/crypto-price
+  durations: [5m, 15m]
+  discovery_interval_s: 15
+  # Expected rules template. Any market that differs is flagged and forced to NO TRADE.
+  expected_rules:
+    twap_enabled: true
+    twap_lookback_seconds: [60]
+    resolution_mechanism: oracle
+    source_contains: chain.link
+    comparator_phrase: "greater than or equal to"
+
+model:
+  path_5m: models/model_5m.json
+  path_15m: models/model_15m.json
+  vol_halflife_s: 900              # EWMA half-life for 1s realised vol
+  min_vol_per_s: 0.00002           # floor on sigma (log-return per sqrt(second))
+
+signal:
+  buffer: 0.04                     # required edge on top of fees + spread/slippage
+  stake_usd: 50                    # size used to walk the book for slippage
+  max_spread: 0.04
+  min_seconds_left: 10
+  max_seconds_left_5m: 290
+  max_seconds_left_15m: 880
+  eval_interval_s: 1
+  max_entries_per_window: 1
+
+exits:
+  eval_interval_s: 2
+  hold_buffer: 0.01                # SELL if bid >= fair - hold_buffer (edge gone)
+  stop_threshold: 0.15             # SELL if fair < entry - stop_threshold
+  take_profit: 0.20                # consider locking profit if bid >= entry + take_profit
+  lock_remaining_ev: 0.03          # ...and remaining EV of holding < this
+
+news:
+  enabled: true
+  poll_interval_s: 60
+  feeds:
+    - https://www.coindesk.com/arc/outboundfeeds/rss/
+    - https://cointelegraph.com/rss
+    - https://decrypt.co/feed
+    - https://www.theblock.co/rss.xml
+  sentiment_halflife_min: 30
+  shock_confidence: 0.8            # a headline at/above this confidence...
+  shock_block_min: 5               # ...blocks new signals for this many minutes
+
+calendar:
+  enabled: true
+  feed_url: https://nfs.faireconomy.media/ff_calendar_thisweek.json
+  refresh_interval_s: 3600
+  local_file: events.yaml          # manual additions / overrides
+  countries: [USD]
+  impacts: [High]
+  blackout_before_min: 5
+  blackout_after_min: 10
+
+derivatives:
+  enabled: true
+  provider: hyperliquid            # hyperliquid | binance
+  poll_interval_s: 10
+  hyperliquid_url: https://api.hyperliquid.xyz/info
+  binance_url: https://fapi.binance.com
+
+paper:
+  enabled: true
+  stake_usd: 50
+
+alerts:
+  sound: true
+  desktop: true

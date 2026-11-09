@@ -1,6 +1,6 @@
 # BTC Up/Down Signal App — Research Findings & Architecture Proposal
 
-Status: **proposal, awaiting approval** (no app code written yet).
+Status: **implemented** (see README.md). Decisions: legacy RTDS with optional PolyBolt keys, Kraken as backup spot, Hyperliquid derivatives, plain HTML/JS. Findings made while building are in section 5.
 Research date: 2026-11-09, against live Polymarket production APIs.
 
 The app is advisory only. It never signs, places, or cancels orders.
@@ -206,3 +206,13 @@ Python 3.11+, FastAPI, uvicorn, `websockets`, `httpx`, `aiosqlite`, numpy/pandas
 2. **Exchange access:** where will you run this? If in the US, Binance is blocked. Should the secondary spot feed be Binance.US or Kraken?
 3. **Derivatives provider:** Hyperliquid by default, OK?
 4. **Frontend:** plain HTML/JS (no build step) or React?
+
+## 5. Findings during implementation (2026-11-09)
+
+1. **Price to beat confirmed.** The app's Chainlink 60s-TWAP capture at 14:20:00 UTC (74542.42745271068) matched Gamma's `priceToBeat` for `btc-updown-5m-1794234000` exactly.
+2. **Gamma vs the site's price API.** Gamma `priceToBeat`/`finalPrice` matched the actual resolution in 137/137 windows. `polymarket.com/api/crypto/crypto-price` open/close (Chainlink *spot* at the boundaries) disagreed with the resolution in 15/138. The dashboard shows the latter only as a greyed-out comparison.
+3. **Gamma publishes `priceToBeat` only after a window closes**, and `finalPrice` a few minutes later still. A window that is already under way when the app starts has no price to beat until the previous window's final is published.
+4. **RTDS quirks.** Two subscriptions on one socket stop live updates. The filter must be compact JSON (`{"symbol":"btc/usd"}`); with spaces, only the snapshot arrives. The Chainlink snapshot uses topic `crypto_prices`.
+5. **CLOB websocket.** The `websockets` default `max_queue=16` causes server disconnects with 1013 "slow consumer" during bursts. It is raised to 8192.
+6. **Data API v2 rate limits.** `/v2/trades` returns 429 quickly. The collector throttles to 2 req/s, honours `Retry-After`, and retries failed windows on the next run.
+7. **First backtest** (1 day, 5m): the TWAP-aware prior is overconfident in the tails and adversely selected when it disagrees with the market. No significant edge found yet; see the README.

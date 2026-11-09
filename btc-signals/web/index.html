@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTC Up/Down Signals</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">BTC Up/Down Signals <span class="muted">advisory only, never trades</span></div>
+  <div class="prices">
+    <div><span class="label">Chainlink</span> <b id="ref-spot">–</b> <span id="ref-src" class="tag"></span></div>
+    <div><span class="label">60s TWAP</span> <b id="ref-twap">–</b></div>
+    <div><span class="label">Spot</span> <b id="spot">–</b></div>
+    <div><span class="label">Gap</span> <b id="gap">–</b></div>
+  </div>
+  <div class="controls">
+    <button id="enable-alerts" title="Enable sound and desktop alerts">Enable alerts</button>
+    <span id="conn" class="dot bad" title="dashboard connection"></span>
+  </div>
+</header>
+
+<div id="banner-degraded" class="banner bad hidden"></div>
+<div id="banner-rules" class="banner warn hidden"></div>
+<div id="banner-blackout" class="banner warn hidden"></div>
+
+<main>
+  <section class="windows">
+    <article class="card window" id="w-5m"></article>
+    <article class="card window" id="w-15m"></article>
+  </section>
+
+  <section class="grid2">
+    <article class="card">
+      <h2>My positions</h2>
+      <form id="pos-form" class="pos-form">
+        <select name="duration"><option>5m</option><option>15m</option></select>
+        <select name="side"><option>UP</option><option>DOWN</option></select>
+        <input name="entry_price" type="number" step="0.01" min="0.01" max="0.99" placeholder="entry 0.55" required>
+        <input name="shares" type="number" step="0.01" min="0.01" placeholder="shares" required>
+        <button type="submit">Add</button>
+      </form>
+      <div id="positions"></div>
+      <h3>Paper trades (open)</h3>
+      <div id="paper-open"></div>
+    </article>
+
+    <article class="card">
+      <h2>Paper-trading stats</h2>
+      <div id="stats"></div>
+      <div class="charts">
+        <figure><figcaption>Calibration: predicted vs actual P(UP)</figcaption><div id="calib"></div></figure>
+        <figure><figcaption>Paper equity (exit rules)</figcaption><div id="equity"></div></figure>
+      </div>
+    </article>
+  </section>
+
+  <section class="grid3">
+    <article class="card"><h2>Feeds</h2><div id="feeds"></div></article>
+    <article class="card"><h2>Calendar &amp; derivatives</h2><div id="calendar"></div><div id="derivs"></div></article>
+    <article class="card"><h2>News <span id="news-score" class="tag"></span></h2><div id="news"></div></article>
+  </section>
+
+  <section class="card"><h2>Alerts</h2><div id="alerts"></div></section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
