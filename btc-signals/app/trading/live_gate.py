@@ -13,13 +13,19 @@ from .store import SCHEMA, bot_stats
 CONFIRM_PHRASE = "I UNDERSTAND THIS TRADES REAL MONEY"
 
 
-def paper_record(db_path: str, venue: str = "polymarket_intl") -> tuple[int, dict]:
-    """Closed paper trades ON THIS VENUE (practice on one exchange doesn't count for the other)."""
+def paper_record(db_path: str, venue: str = "polymarket_intl",
+                 module: str = "crypto_updown") -> tuple[int, dict]:
+    """Closed paper trades ON THIS VENUE and MODULE (practice on one exchange doesn't count for the
+    other, and sports trades don't count toward the crypto requirement)."""
     c = sqlite3.connect(db_path)
     c.row_factory = sqlite3.Row
     c.executescript(SCHEMA)
     cols = {r["name"] for r in c.execute("PRAGMA table_info(bot_positions)")}
-    if "venue" in cols:
+    if "venue" in cols and "module" in cols:
+        rows = c.execute("SELECT * FROM bot_positions WHERE mode='paper' AND status='closed' AND "
+                         "COALESCE(venue,'polymarket_intl')=? AND COALESCE(module,'crypto_updown')=? "
+                         "ORDER BY closed_ts", (venue, module))
+    elif "venue" in cols:
         rows = c.execute("SELECT * FROM bot_positions WHERE mode='paper' AND status='closed' AND "
                          "COALESCE(venue,'polymarket_intl')=? ORDER BY closed_ts", (venue,))
     else:

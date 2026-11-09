@@ -213,3 +213,17 @@ def test_us_discovery_refresh_uses_gateway():
     w = disc.get("5m", 1794240600)
     asyncio.run(disc.refresh(w))
     assert w.found and w.price_to_beat is None and w.gamma_ptb == 75041.79 and w.venue == "polymarket_us"
+
+
+def test_sports_paper_trades_do_not_count_toward_crypto_gate(tmp_path):
+    from app.db import DB
+    from app.trading.live_gate import paper_record
+    from app.trading.store import TradeStore
+    db = tmp_path / "m.db"
+    d = DB(db)
+    TradeStore(d, "paper", "polymarket_us", "sports")
+    for i in range(250):
+        d.insert("bot_positions", {"mode": "paper", "status": "closed", "pnl": 0.1, "cost": 5, "entry_fee": 0,
+                                   "exit_fee": 0, "closed_ts": i, "venue": "polymarket_us", "module": "sports"})
+    assert paper_record(str(db), "polymarket_us")[0] == 0
+    assert paper_record(str(db), "polymarket_us", "sports")[0] == 250
