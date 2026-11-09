@@ -195,3 +195,25 @@ def test_missing_book_tries_other_market_then_stops_cleanly(monkeypatch):
     with pytest.raises(T.Abort, match="not two-sided"):
         asyncio.run(T.pick_market(client, {}, "15m", now=NOW_FIXED))
     assert sum(p.endswith("/book") for p in calls) == 2          # tried 15m, then 5m
+
+
+def test_part2_rereads_price_after_confirmation(tmp_path, monkeypatch):
+    """The ask jumps 3c while the phrase is typed: nothing is bought."""
+    ex = FakeExchange()
+    moved = {"on": False}
+    orig = ex.gateway
+
+    def gw(req):
+        if moved["on"] and req.url.path.endswith("/book"):
+            return httpx.Response(200, json={"marketData": {"bids": [{"px": {"value": "0.51"}, "qty": "9"}],
+                                                            "offers": [{"px": {"value": "0.53"}, "qty": "9"}]}})
+        return orig(req)
+    ex.gateway = gw
+
+    def typed(_):
+        moved["on"] = True
+        return T.FILL_PHRASE
+    with pytest.raises(T.Abort, match="moved from 0.5 to 0.53"):
+        _run(ex, monkeypatch, fill=True, qty=1, confirm=lambda _: "y", input_fn=typed, db=str(tmp_path / "d.db"))
+    assert all(o["intent"] != "ORDER_INTENT_BUY_LONG" or o["tif"] != "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+               for o in ex.orders.values())                        # no real buy was sent

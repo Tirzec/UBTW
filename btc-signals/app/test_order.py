@@ -109,6 +109,18 @@ async def cancel_new_orders(broker, known: set) -> None:
             print(f"!! cleanup could not cancel {oid} ({e}). Cancel it in the Polymarket app NOW.", flush=True)
 
 
+async def order_diagnostics(broker, order_id: str) -> str:
+    """What the exchange itself reports about an order (state, quantities, reject reason)."""
+    try:
+        d = await broker._req("GET", f"/v1/order/{order_id}")
+    except Exception as e:  # noqa: BLE001
+        return f"(could not read order: {e})"
+    o = d.get("order") or d
+    keep = ("state", "type", "tif", "price", "quantity", "cumQuantity", "leavesQuantity", "avgPx",
+            "rejectReason", "ordRejReason", "text", "cancelReason", "commissionNotionalTotalCollected")
+    return ", ".join(f"{k}={o[k]}" for k in keep if k in o) or str(o)[:300]
+
+
 async def settle(broker, o, timeout: float = 6.0, poll_s: float = 0.4):
     """Re-read an order until the exchange reports it finished (filled / canceled / rejected)."""
     deadline = time.time() + timeout
@@ -198,7 +210,20 @@ async def part2(broker, gw, w, qty: float, rep: Report, store=None, input_fn=inp
 
     token = long_token(w.slug)
     tick = w.tick_size
-    buy = await broker.place_limit(token=token, side="BUY", price=ask, size=qty, post_only=False)
+    # typing the phrase takes a while and the market moves: re-read the price NOW
+    _, fresh_asks = await get_book(gw, w.slug)
+    if not fresh_asks:
+        raise Abort("no sellers in the book right now; nothing was bought. Try again")
+    ask_now = fresh_asks[0][0]
+    if ask_now > ask + 2 * tick + 1e-9:
+        raise Abort(f"the ask moved from {ask} to {ask_now} while you were typing; nothing was bought. "
+                    "Run it again")
+    limit = round(min(ask_now + tick, ask + 2 * tick), 6)        # 1 tick of room, never > approved + 2
+    if qty * limit + fee_usdc(qty, limit, sched) > max_cost:
+        raise Abort("price moved above the cost cap; nothing was bought")
+    print(f"ask now {ask_now}; buying with limit {limit}", flush=True)
+    ask = ask_now
+    buy = await broker.place_limit(token=token, side="BUY", price=limit, size=qty, post_only=False)
     buy = await settle(broker, buy)
     if store:
         store.order(buy, None, "test_fill_buy")
@@ -211,7 +236,10 @@ async def part2(broker, gw, w, qty: float, rep: Report, store=None, input_fn=inp
                          f"(status {buy.status}, filled {buy.filled:g}). Check the Polymarket app")
         return {}
     if not buy.filled:
-        rep.step("WARN", "buy did not fill (the ask moved away); nothing to sell, no money spent")
+        raw = await order_diagnostics(broker, buy.order_id)
+        _, a2 = await get_book(gw, w.slug)
+        rep.step("WARN", f"buy did not fill; nothing to sell, no money spent. Exchange says: {raw}. "
+                         f"Ask right after: {a2[0][0] if a2 else 'none'} (our limit {limit})")
         return {}
     rep.step("PASS", f"bought {buy.filled:g} @ {buy.avg_price:.4f} (quoted ask {ask}), fee ${buy.fee:.2f}")
 
