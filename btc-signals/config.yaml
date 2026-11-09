@@ -198,7 +198,7 @@ trading:
     exit_order_timeout_s: 3
   risk:                            # sized for a $3.64 account (was 5 / 25 / 15 / 10)
     max_stake_usd: 1
-    daily_loss_limit_usd: 1
+    daily_loss_limit_usd: 5        # user's choice 2026-11-09 (was 1); phase-1 hard cap is 10
     max_consecutive_losses: 5
     max_total_exposure_usd: 2
     min_wallet_balance_usd: 1      # stop trading if buying power falls below this
@@ -228,7 +228,7 @@ modules:
   crypto_updown: {enabled: true}
 
 risk_global:                       # across ALL modules (small account; was 40 / 60)
-  daily_loss_limit_usd: 1.50
+  daily_loss_limit_usd: 5          # user's choice 2026-11-09 (was 1.50)
   max_total_exposure_usd: 3
 
 sports:                            # Polymarket US sports (needs venue: polymarket_us)
