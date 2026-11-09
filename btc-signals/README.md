@@ -44,6 +44,21 @@ python -m app.main              # open http://127.0.0.1:8000
 
 Click **Enable alerts** once in the browser to allow sound and desktop notifications.
 
+**"This site can't provide a secure connection" / "can't establish a secure connection"?**
+Something on your computer (a school or work security profile, a VPN, or a browser setting) is
+forcing https even for localhost. Start the bot with `--https` instead:
+
+```bash
+caffeinate -dis python -m app.main --https      # macOS; plain `python -m app.main --https` elsewhere
+```
+
+Then open **https://localhost:8000**. The first time, the browser warns that the certificate isn't
+trusted. It's a certificate the app just made for your own computer, so it's safe to continue:
+- **Safari:** Show Details → visit this website
+- **Chrome:** Advanced → Proceed to localhost
+
+Set `server.https: true` in `config.yaml` to make this the default.
+
 Start the app **before** a window begins. The price to beat comes from Chainlink at the boundary,
 and Gamma only publishes it after the window closes. Windows already running at startup show
 "price to beat unknown" (NO TRADE) unless the previous window's official final price is out.

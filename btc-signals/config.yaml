@@ -3,6 +3,7 @@
 server:
   host: 127.0.0.1
   port: 8000
+  https: false        # true (or run with --https) if your browser forces https even for localhost
 
 db_path: data/signals.db
 

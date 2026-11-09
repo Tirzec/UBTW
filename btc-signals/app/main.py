@@ -103,16 +103,63 @@ def create_app(cfg: dict | None = None, start_engine: bool = True) -> FastAPI:
     return app
 
 
-def main() -> None:
+def ensure_self_signed_cert(cert: Path, key: Path) -> None:
+    """Create a localhost certificate with the openssl CLI (built into macOS) if missing."""
+    import shutil
+    import subprocess
+
+    if cert.exists() and key.exists():
+        return
+    if not shutil.which("openssl"):
+        raise SystemExit("--https needs the `openssl` command (built into macOS; "
+                         "on Linux: apt install openssl)")
+    cert.parent.mkdir(parents=True, exist_ok=True)
+    base = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256",
+            "-days", "825", "-keyout", str(key), "-out", str(cert), "-subj", "/CN=localhost"]
+    san = ["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"]
+    r = subprocess.run(base + san, capture_output=True, text=True)
+    if r.returncode != 0:          # very old openssl without -addext
+        r = subprocess.run(base, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"could not create certificate: {r.stderr.strip()}")
+    log.info("created self-signed certificate %s", cert)
+
+
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
     import uvicorn
+
+    from .config import resolve_path
+
+    ap = argparse.ArgumentParser(prog="python -m app.main")
+    ap.add_argument("--https", action="store_true",
+                    help="serve the dashboard over https with a self-signed certificate "
+                         "(use when your browser forces https even for localhost)")
+    ap.add_argument("--port", type=int, help="override server.port")
+    args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     cfg = load_config()
     sc = cfg.get("server", {})
-    uvicorn.run(create_app(cfg), host=sc.get("host", "127.0.0.1"), port=int(sc.get("port", 8000)),
-                log_level="warning")
+    host = sc.get("host", "127.0.0.1")
+    port = int(args.port or sc.get("port", 8000))
+    use_https = args.https or bool(sc.get("https", False))
+    ssl = {}
+    if use_https:
+        cert = resolve_path(cfg, sc.get("ssl_certfile", "data/localhost-cert.pem"))
+        key = resolve_path(cfg, sc.get("ssl_keyfile", "data/localhost-key.pem"))
+        ensure_self_signed_cert(cert, key)
+        ssl = {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}
+    scheme = "https" if use_https else "http"
+    shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
+    print(f"\n  Dashboard: {scheme}://{shown}:{port}\n", flush=True)
+    if use_https:
+        print("  (self-signed certificate: your browser will warn once - choose "
+              "'Show Details' / 'Advanced' and continue to localhost)\n", flush=True)
+    uvicorn.run(create_app(cfg), host=host, port=port, log_level="warning", **ssl)
 
 
 if __name__ == "__main__":
