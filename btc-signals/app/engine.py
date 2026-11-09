@@ -22,6 +22,7 @@ from .ingest.discovery import DURATION_SECONDS, Discovery, Window
 from .ingest.news import Headline, NewsFeed
 from .ingest.polymarket_ws import ClobMarketStream
 from .model import LogisticModel, top_drivers
+from .notify import Notifier
 from .paper import PaperTrader, paper_stats
 from .signal import Decision, decide
 
@@ -60,6 +61,7 @@ class Engine:
         self.clob = ClobMarketStream(cfg, self.http)
         self.derivs = Derivatives(cfg, self.http)
         self.news = NewsFeed(cfg, on_new=self._on_headline)
+        self.notifier = Notifier(cfg, self.http)
         self.calendar = EconCalendar(cfg)
         mc = cfg.get("model", {})
         self.models = {"5m": LogisticModel.load(resolve_path(cfg, mc.get("path_5m", "models/model_5m.json"))),
@@ -110,8 +112,13 @@ class Engine:
     # ------------------------------------------------------------ alerts
     def alert(self, kind: str, title: str, body: str = "", level: str = "info") -> None:
         self._alert_id += 1
-        self.alerts.append({"id": self._alert_id, "ts": time.time(), "kind": kind,
-                            "title": title, "body": body, "level": level})
+        a = {"id": self._alert_id, "ts": time.time(), "kind": kind,
+             "title": title, "body": body, "level": level}
+        self.alerts.append(a)
+        try:
+            self.notifier.submit(a)
+        except RuntimeError:      # no running event loop (e.g. in unit tests)
+            pass
 
     def _on_headline(self, h: Headline) -> None:
         self.db.execute("INSERT OR IGNORE INTO news VALUES (?,?,?,?,?,?,?,?)",
@@ -166,6 +173,10 @@ class Engine:
             gates.append("market not found on Polymarket yet")
         if w.rules is not None and not w.rules.ok:
             gates.append("RULES MISMATCH: " + "; ".join(w.rules.mismatches))
+            if not getattr(w, "_rules_alerted", False):
+                w._rules_alerted = True  # type: ignore[attr-defined]
+                self.alert("rules", f"{w.duration}: RULES MISMATCH - no trading",
+                           "; ".join(w.rules.mismatches), "warn")
         if q.degraded:
             gates.append("DEGRADED DATA: " + "; ".join(q.reasons))
         self.ensure_price_to_beat(w, now)
@@ -283,8 +294,9 @@ class Engine:
                         asks=book.get("asks", []), p_model=p_side, edge=d.edge,
                         fee_schedule=w.fee_schedule)
         why = "; ".join(x["text"] for x in ev.drivers)
-        self.alert("signal", f"{w.duration}: BUY {d.action} @ {q.best_ask:.2f}",
-                   f"model {p_side:.0%} vs ask {q.best_ask:.2f}, edge {d.edge:+.1%}. {why}", "signal")
+        self.alert("signal", f"{w.duration}: BUY {d.action} @ ≤{q.best_ask:.2f}",
+                   f"model {p_side:.0%} vs ask {q.best_ask:.2f}, edge {d.edge:+.1%}, "
+                   f"{w.end - now:.0f}s left. {why}\nhttps://polymarket.com/event/{w.slug}", "signal")
         log.info("SIGNAL %s %s edge=%.3f p=%.3f", w.slug, d.action, d.edge, p_side)
 
     async def _signal_loop(self) -> None:
@@ -356,7 +368,9 @@ class Engine:
                                        p["entry_price"] * p["shares"], now)
                     prev = self.position_advice.get(key, {}).get("action")
                     if adv["action"] in ("SELL", "HOLD") and prev and prev != adv["action"]:
-                        self.alert("exit", f"Position #{p['id']} {p['side']}: {adv['action']}",
+                        px = adv.get("exit_price")
+                        self.alert("exit", f"Position #{p['id']} {p['duration']} {p['side']}: {adv['action']}"
+                                   + (f" @ ~{px:.2f}" if adv["action"] == "SELL" and px else ""),
                                    adv["reason"], "signal" if adv["action"] == "SELL" else "info")
                     self.position_advice[key] = adv
                 for t in self.paper.open_trades():
@@ -446,5 +460,6 @@ class Engine:
                          "active": [e.as_dict() for e in self.calendar.blackouts(now)],
                          "error": self.calendar.error},
             "derivs": self.derivs.snapshot(),
+            "notifications": self.notifier.status(),
             "alerts": list(self.alerts)[-20:],
         }

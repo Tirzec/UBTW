@@ -130,3 +130,13 @@ paper:
 alerts:
   sound: true
   desktop: true
+
+# Phone push notifications. Set NTFY_TOPIC (or TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID) in .env.
+notifications:
+  enabled: true
+  ntfy_server: https://ntfy.sh
+  # which alerts to push: signal (new trade signal), exit (SELL/HOLD change on your positions),
+  # degraded (data went bad / recovered), rules (market rules changed), settled (window results)
+  kinds: [signal, exit, degraded, rules]
+  min_interval_s: 2
+  click_url: ""                    # optional: link opened when you tap the notification

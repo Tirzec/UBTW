@@ -192,7 +192,7 @@ function renderFeeds(s) {
   const c = s.clob || {};
   $("feeds").innerHTML = `<div class="table-wrap"><table><tr><th>Feed</th><th>Status</th><th class="num">Age</th><th class="num">Last</th></tr>${rows}
     <tr><td>polymarket clob</td><td>${c.connected ? '<span class="tag ok">LIVE</span>' : '<span class="tag bad">DOWN</span>'} <span class="muted">${c.reconnects ? c.reconnects + " reconnects; last: " + esc(c.error || "") : ""}</span></td><td class="num">${c.last_msg_age == null ? "–" : c.last_msg_age + "s"}</td><td></td></tr>
-    </table></div><p class="muted">event-loop lag ${num(s.loop_lag_ms, 0)} ms</p>${s.discovery_error ? `<p class="blocked">discovery: ${esc(s.discovery_error)}</p>` : ""}`;
+    </table></div><p class="muted">event-loop lag ${num(s.loop_lag_ms, 0)} ms · phone alerts: ${(s.notifications || {}).enabled ? esc(s.notifications.channels.join(", ")) + ` (${s.notifications.sent} sent)` : "off (set NTFY_TOPIC in .env)"}${(s.notifications || {}).error ? ` <span class="blocked">${esc(s.notifications.error)}</span>` : ""}</p>${s.discovery_error ? `<p class="blocked">discovery: ${esc(s.discovery_error)}</p>` : ""}`;
 }
 
 function renderCalendar(s) {

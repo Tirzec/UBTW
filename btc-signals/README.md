@@ -38,7 +38,7 @@ cd btc-signals
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env            # optional: Polymarket API keys for the PolyBolt feed
-python -m pytest                # 72 tests, about 1 s
+python -m pytest                # 75 tests, about 1 s
 python -m app.main              # open http://127.0.0.1:8000
 ```
 
@@ -54,7 +54,54 @@ Polymarket: `gamma-api.polymarket.com`, `clob.polymarket.com`, `ws-subscriptions
 `data-api.polymarket.com` (backtest), `polymarket.com` (display-only cross-check).
 Spot: `ws-feed.exchange.coinbase.com`, `ws.kraken.com`. Derivatives: `api.hyperliquid.xyz`.
 News: CoinDesk, Cointelegraph, Decrypt, The Block RSS. Calendar: `nfs.faireconomy.media`.
+Phone alerts: `ntfy.sh` or `api.telegram.org`.
 Backtest bars: `data-api.binance.vision`. Binance's trading API is geo-blocked in the US and is off by default.
+
+---
+
+## Phone alerts (works anywhere, phone locked)
+
+The app runs on your computer, and alerts are pushed to your phone over the internet through
+[ntfy](https://ntfy.sh) (free, no account) or Telegram.
+
+**ntfy setup (2 minutes):**
+1. Install **ntfy** from the App Store or Google Play.
+2. In the app, tap **+** and subscribe to a topic name only you know, e.g. `btc-signals-k3x9q7m2v8`.
+   Anyone who knows the name can read your alerts, so make it long and random.
+3. On your computer, put the same name in `btc-signals/.env`:
+   ```
+   NTFY_TOPIC=btc-signals-k3x9q7m2v8
+   ```
+4. Send a test: `python -m app.notify`. Your phone should buzz.
+5. Start the app as usual (`python -m app.main`). The Feeds panel shows "phone alerts: ntfy (N sent)".
+
+**What you get:**
+
+| Alert | Example |
+|---|---|
+| New signal | **5m: BUY UP @ ≤0.55**: model 62% vs ask 0.55, edge +2.3%, 240s left, the top reasons, and the market link |
+| Advice change on a position you added | **Position #3 5m UP: SELL @ ~0.81**, with the reason (edge gone, stop, or lock profit) |
+| Data problem | **DEGRADED DATA - signals off**, and "signals back on" when it recovers |
+| Market rules changed | **RULES MISMATCH - no trading** |
+
+Choose which alerts are pushed under `notifications.kinds` in `config.yaml`. Add `settled` to
+also get window results.
+
+**Telegram instead:**
+1. Create a bot with @BotFather and send your bot any message.
+2. Open `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your chat id.
+3. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`.
+
+If both ntfy and Telegram are set, alerts go to both.
+
+**Away from your computer:** to act on a SELL for a position you entered in the dashboard, sell in
+the Polymarket app. To add a position or see the full dashboard from your phone, use Tailscale (free):
+1. Install it on the computer and the phone, signed in to the same account.
+2. Set `server.host: 0.0.0.0` in `config.yaml`.
+3. On the phone, open `http://<computer-name>:8000`.
+
+Never expose port 8000 to the internet; the dashboard has no login.
+The computer must stay on and awake with the app running (turn off sleep).
 
 ---
 
@@ -245,8 +292,9 @@ app/features.py  feature math        app/model.py   logistic model + explanation
 app/signal.py    entry decision      app/exits.py   SELL/HOLD    app/fees.py  fee curve, book walking
 app/engine.py    live loop           app/paper.py   paper trader + stats   app/db.py  SQLite
 app/main.py      FastAPI + websocket web/           dashboard (plain HTML/JS)
+app/notify.py    phone push alerts (ntfy / Telegram)
 backtest/        collect / replay / train / report
-tests/           72 tests: features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
+tests/           75 tests: features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
                  parsers and staleness, degraded-data end-to-end, books, model, backtester
 docs/ARCHITECTURE.md   research notes and design
 ```
