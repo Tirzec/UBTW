@@ -136,9 +136,13 @@ Known limitations on Polymarket US:
    (Windows: `.\windows\preflight.bat --expect-balance 50`). It checks: secrets not in git, API
    key, balance, open orders/positions, clock, crypto + sports markets and books, price feeds, risk
    limits, and paper trades (300 crypto / 200 sports). It only sends signed GET requests.
-5. Let **paper mode run for 300+ trades on Polymarket US** (`python -m app.trader stats`).
+5. **Test order** (`python -m app.test_order`, Windows `.\windows\test-order.bat`): one
+   minimum-size maker BUY at 1c, confirmed open, canceled, cancel confirmed (costs nothing). With
+   `--fill` (and a typed phrase) it then buys the minimum at the ask and sells it straight back,
+   reporting actual fees and slippage vs predicted. `--qty 1` gives a fee big enough to measure.
+6. Let **paper mode run for 300+ trades on Polymarket US** (`python -m app.trader stats`).
    Paper trades on the other exchange don't count.
-6. In `config.yaml` set `trading.mode: live` and `trading.live_trading_enabled: true`, then start
+7. In `config.yaml` set `trading.mode: live` and `trading.live_trading_enabled: true`, then start
    the app. It checks that your key works (shows your buying power), prints your paper stats and
    risk limits, and asks you to type `I UNDERSTAND THIS TRADES REAL MONEY`.
 
@@ -542,6 +546,7 @@ app/notify.py    phone push alerts (ntfy / Telegram)
 app/trading/     auto-trader: rules, risk, paper/live brokers, audit store, live gate
 app/trader.py    kill switch / status CLI
 app/preflight.py read-only live-readiness checks (python -m app.preflight)
+app/test_order.py step-4 order test: rest + cancel, optional tiny real fill (python -m app.test_order)
 app/env_guard.py refuse to start if .env is tracked by git
 app/clock.py     clock check (NTP, falls back to the exchange's HTTPS clock; w32tm status on Windows)
 app/keepawake.py stop idle sleep while running (Windows / macOS / Linux)
