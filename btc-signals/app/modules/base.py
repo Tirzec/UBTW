@@ -48,6 +48,7 @@ class MarketInfo:
     slug: str
     tick_size: float = 0.01
     min_size: float = 1.0
+    size_step: float = 0.01                  # contract increment (whole-contract markets: 1)
     fee_schedule: dict = field(default_factory=dict)
     condition_id: str = ""
     label: str = ""

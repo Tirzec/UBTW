@@ -44,6 +44,7 @@ class Window:
     fee_schedule: dict = field(default_factory=dict)
     tick_size: float = 0.01
     min_size: float = 5
+    size_step: float = 0.01
     accepting_orders: bool = False
     rules: RuleSpec | None = None
     found: bool = False

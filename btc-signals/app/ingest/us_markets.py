@@ -89,9 +89,10 @@ def apply_us_market(w: Window, market: dict, taker_theta_override: float | None 
     w.condition_id = str(market.get("id", ""))
     w.token_up, w.token_down = long_token(w.slug), short_token(w.slug)
     theta = taker_theta_override if taker_theta_override is not None else market.get("feeCoefficient", 0.095)
-    w.fee_schedule = {"rate": float(theta), "exponent": 1, "takerOnly": True}
+    w.fee_schedule = {"rate": float(theta), "exponent": 1, "takerOnly": True, "round_cents": True}
     w.tick_size = float(market.get("orderPriceMinTickSize") or 0.01)
     w.min_size = float(market.get("minimumTradeQty") or 1)
+    w.size_step = 0.01 if w.min_size < 1 else 1.0     # a few US markets trade whole contracts only
     status = market.get("status", "")
     w.accepting_orders = status == "MARKET_STATUS_OPEN"
     w.rules = validate_us_rules(market, w.duration)

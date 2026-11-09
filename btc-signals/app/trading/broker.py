@@ -70,12 +70,13 @@ class PaperBroker:
 
     def __init__(self, get_book: Callable[[str], Optional[dict]],
                  get_trades: Callable[[str, float], list], fee_schedule_for: Callable[[str], dict],
-                 balance_usd: float = 1000.0):
+                 balance_usd: float = 1000.0, ioc_non_post_only: bool = False):
         self.get_book = get_book
         self.get_trades = get_trades
         self.fee_schedule_for = fee_schedule_for
         self.orders: dict[str, OrderState] = {}
         self.balance_usd = balance_usd
+        self.ioc_non_post_only = ioc_non_post_only
 
     async def place_limit(self, *, token: str, side: str, price: float, size: float,
                           post_only: bool) -> OrderState:
@@ -96,7 +97,12 @@ class PaperBroker:
                 o.filled += take
                 o.notional += take * p
                 o.fee += fee_usdc(take, p, sched)
-        o.status = "filled" if o.filled >= o.size - 1e-9 else ("partial" if o.filled else "live")
+        if o.filled >= o.size - 1e-9:
+            o.status = "filled"
+        elif not post_only and self.ioc_non_post_only:
+            o.status = "canceled"          # immediate-or-cancel: the unfilled rest never rests
+        else:
+            o.status = "partial" if o.filled else "live"
         self.orders[o.order_id] = o
         return o
 

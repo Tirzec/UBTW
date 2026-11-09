@@ -18,8 +18,17 @@ def fee_per_share(price: float, schedule: dict | None = None) -> float:
     return float(s.get("rate", 0.07)) * (p * (1 - p)) ** float(s.get("exponent", 1))
 
 
+def bankers_cents(x: float) -> float:
+    """Round to the nearest $0.01, half to even (Polymarket US: 'banker's rounding')."""
+    from decimal import ROUND_HALF_EVEN, Decimal
+    return float(Decimal(repr(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN))
+
+
 def fee_usdc(shares: float, price: float, schedule: dict | None = None) -> float:
-    return shares * fee_per_share(price, schedule)
+    """Fee for ONE fill. Polymarket US rounds each fill's fee to the cent with banker's
+    rounding (docs.polymarket.us/fees), signalled by schedule["round_cents"]."""
+    raw = shares * fee_per_share(price, schedule)
+    return bankers_cents(raw) if (schedule or {}).get("round_cents") else raw
 
 
 @dataclass

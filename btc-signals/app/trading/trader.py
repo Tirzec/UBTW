@@ -256,7 +256,7 @@ class AutoTrader:
         book = self.module.book(token) or {"bids": [], "asks": []}
         plan = plan_entry(best_bid=book["bids"][0][0] if book["bids"] else None,
                           best_ask=book["asks"][0][0] if book["asks"] else None, stake_usd=stake,
-                          tick=m.tick_size, min_size=m.min_size,
+                          tick=m.tick_size, min_size=m.min_size, size_step=m.size_step,
                           style=self.ec.get("order_style", "maker"), fee_schedule=m.fee_schedule)
         if not plan.ok:
             self.status_note = f"{sig.label} {side} signal skipped: {plan.reason}"
@@ -381,7 +381,7 @@ class AutoTrader:
         if o.filled:
             self.store.event("fill", f"SOLD {p['side']} {o.filled:.2f} @ {o.avg_price:.3f} fee {o.fee:.4f}",
                              position=p["id"], order=o.order_id)
-        if sold >= p["shares"] - 0.01:
+        if sold >= p["shares"] - 1e-6:          # exact: a leftover 0.01 contract is still a position
             self._close(self.store.position(p["id"]), payout=0.0, now=now)
         else:
             self.store.update_position(p["id"], status="open")   # retry the rest next tick

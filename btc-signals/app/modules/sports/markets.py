@@ -53,6 +53,7 @@ class SportsMarket:
     fee_schedule: dict = field(default_factory=dict)
     tick_size: float = 0.01
     min_size: float = 0.01
+    size_step: float = 0.01
     status: str = ""
     rules_ok: bool = False
     rules_issues: list = field(default_factory=list)
@@ -127,9 +128,11 @@ def classify_market(m: dict, event: dict, league: str) -> Optional[SportsMarket]
         long_label=longs[0].get("description", ""), short_label=shorts[0].get("description", ""),
         long_team=(longs[0].get("team") or {}).get("name", ""), short_team=(shorts[0].get("team") or {}).get("name", ""),
         home_team=home, away_team=away, starts_at=_ts(event.get("startDate") or event.get("startTime")),
-        fee_schedule={"rate": float(m.get("feeCoefficient") or 0.095), "exponent": 1, "takerOnly": True},
+        fee_schedule={"rate": float(m.get("feeCoefficient") or 0.095), "exponent": 1, "takerOnly": True,
+                      "round_cents": True},
         tick_size=float(m.get("orderPriceMinTickSize") or 0.01), min_size=float(m.get("minimumTradeQty") or 1),
         status=m.get("status", ""), description=m.get("description") or "")
+    sm.size_step = 0.01 if sm.min_size < 1 else 1.0
     if bet in ("spread", "total") and line is None:
         sm.rules_issues = ["no line"]
     else:

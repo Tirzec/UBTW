@@ -505,7 +505,8 @@ class SportsModule(StrategyModule):
             return None
         live = bool(self.sc.get("live_betting", False))
         st = m.starts_at
-        return MarketInfo(slug=slug, tick_size=m.tick_size, min_size=m.min_size, fee_schedule=m.fee_schedule,
+        return MarketInfo(slug=slug, tick_size=m.tick_size, min_size=m.min_size, size_step=m.size_step,
+                          fee_schedule=m.fee_schedule,
                           condition_id=slug, label=m.league.upper(),
                           entry_deadline=None if (live or st is None) else st - 120,
                           hold_phase_from=None if (live or st is None) else st,

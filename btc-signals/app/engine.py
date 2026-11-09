@@ -121,6 +121,12 @@ class Engine:
         if self.trading_enabled:
             await self._start_trader()
 
+    def tick_for(self, token: str) -> float:
+        for w in self.discovery.windows.values():
+            if token in (w.token_up, w.token_down):
+                return w.tick_size
+        return 0.01
+
     def fee_schedule_for(self, token: str) -> dict:
         for w in self.discovery.windows.values():
             if token in (w.token_up, w.token_down):
@@ -134,12 +140,14 @@ class Engine:
             from .trading.us_broker import UsLiveBroker
             creds = self.cfg["_live_confirmed"]
             broker = UsLiveBroker(creds["key_id"], creds["secret_key"], self.fee_schedule_for,
-                                  base=self.cfg.get("polymarket_us", {}).get("api_url", "https://api.polymarket.us"))
+                                  base=self.cfg.get("polymarket_us", {}).get("api_url", "https://api.polymarket.us"),
+                                  tick_for=self.tick_for)
         elif self.trade_mode == "live":
             creds = self.cfg["_live_confirmed"]
             broker = await LiveBroker.connect(creds["private_key"], creds["wallet"], self.fee_schedule_for)
         else:
-            broker = PaperBroker(self.clob.store.get, self.clob.store.trades_since, self.fee_schedule_for)
+            broker = PaperBroker(self.clob.store.get, self.clob.store.trades_since, self.fee_schedule_for,
+                                 ioc_non_post_only=self.venue == "polymarket_us")
         from .trading.risk import GlobalRisk
         self.global_risk = GlobalRisk(self.cfg.get("risk_global", {}))
         crypto_on = (self.cfg.get("modules", {}) or {}).get("crypto_updown", {}).get("enabled", True)
@@ -175,13 +183,17 @@ class Engine:
         self.sports.attach(store)
         fee_for = lambda tok: (self.sports.market_index.get(tok.rsplit(":", 1)[0]).fee_schedule  # noqa: E731
                                if self.sports.market_index.get(tok.rsplit(":", 1)[0]) else {})
+        tick_for = lambda tok: (self.sports.market_index.get(tok.rsplit(":", 1)[0]).tick_size  # noqa: E731
+                                if self.sports.market_index.get(tok.rsplit(":", 1)[0]) else 0.01)
         if mode == "live":
             from .trading.us_broker import UsLiveBroker
             creds = self.cfg["_live_confirmed"]
             broker = UsLiveBroker(creds["key_id"], creds["secret_key"], fee_for,
-                                  base=self.cfg.get("polymarket_us", {}).get("api_url", "https://api.polymarket.us"))
+                                  base=self.cfg.get("polymarket_us", {}).get("api_url", "https://api.polymarket.us"),
+                                  tick_for=tick_for)
         else:
-            broker = PaperBroker(self.sports.books.get, self.sports.books.trades_since, fee_for)
+            broker = PaperBroker(self.sports.books.get, self.sports.books.trades_since, fee_for,
+                                 ioc_non_post_only=True)
         t = AutoTrader(self, self.cfg, broker, store, module=self.sports, exec_conf=sc,
                        global_risk=self.global_risk, min_paper_trades=need)
         self.traders["sports"] = t

@@ -50,13 +50,31 @@ def split_token(token: str) -> tuple[str, str]:
     return slug, side
 
 
-def order_body(token: str, side: str, price: float, size: float, post_only: bool) -> dict:
-    """Build the create-order request (pure; unit-tested)."""
+def tick_decimals(tick: float) -> int:
+    s = f"{tick:.6f}".rstrip("0")
+    return len(s.split(".")[1]) if "." in s else 0
+
+
+def format_price(px: float, tick: float) -> str:
+    """Snap to the market's tick (0.01; NFL uses 0.0025 / 0.005) and format exactly."""
+    snapped = round(round(px / tick) * tick, 6)
+    snapped = min(max(snapped, 0.01), 0.99)            # exchange absolute limits
+    return f"{snapped:.{max(2, tick_decimals(tick))}f}"
+
+
+def order_body(token: str, side: str, price: float, size: float, post_only: bool,
+               tick: float = 0.01) -> dict:
+    """Build the create-order request (pure; unit-tested).
+
+    Entries (post_only) rest as GTC maker-only orders. Non-post-only orders (exits, crossing
+    entries) are IMMEDIATE-OR-CANCEL: they never rest, so a lost response can't leave a
+    second live order behind."""
     slug, leg = split_token(token)
     long_px = price if leg == "long" else 1.0 - price
     return {"marketSlug": slug, "type": "ORDER_TYPE_LIMIT",
-            "price": {"value": f"{round(long_px, 2):.2f}", "currency": "USD"},
-            "quantity": round(size, 2), "tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "price": {"value": format_price(long_px, tick), "currency": "USD"},
+            "quantity": round(size, 2),
+            "tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL" if post_only else "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
             "intent": INTENTS[(leg, side)], "participateDontInitiate": bool(post_only),
             "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
 
@@ -99,9 +117,11 @@ class UsLiveBroker:
     mode = "live"
 
     def __init__(self, key_id: str, secret: str, fee_schedule_for: Callable[[str], dict],
-                 client: httpx.AsyncClient | None = None, base: str = API):
+                 client: httpx.AsyncClient | None = None, base: str = API,
+                 tick_for: Callable[[str], float] | None = None):
         self.signer = Signer(key_id, secret)
         self.fee_schedule_for = fee_schedule_for
+        self.tick_for = tick_for or (lambda token: 0.01)
         self.client = client or httpx.AsyncClient(timeout=10)
         self.base = base
         self.orders: dict[str, OrderState] = {}
@@ -127,7 +147,8 @@ class UsLiveBroker:
                           post_only: bool) -> OrderState:
         o = OrderState("", token, side, price, size, post_only)
         try:
-            d = await self._req("POST", "/v1/orders", order_body(token, side, price, size, post_only))
+            d = await self._req("POST", "/v1/orders", order_body(token, side, price, size, post_only,
+                                                                 self.tick_for(token)))
         except BrokerError as e:
             if post_only and ("participate" in str(e).lower() or "would match" in str(e).lower()):
                 o.order_id, o.status = f"rejected-{uuid.uuid4().hex[:8]}", "rejected"

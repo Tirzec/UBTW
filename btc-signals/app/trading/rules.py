@@ -1,16 +1,18 @@
 """Pure decision functions for the auto-trader (no I/O, fully unit-tested).
 
-Fees (docs.polymarket.com/trading/fees, confirmed 2026-11): takers pay
-shares * rate * p * (1 - p) with rate 0.07 on crypto markets; makers pay 0.
-Entries are post-only limit orders (maker, fee 0). Exits are marketable limit
-sells (taker, fee charged). All P&L below includes both.
+Fees: takers pay shares * rate * p * (1 - p); makers pay 0.
+  Polymarket US (docs.polymarket.us/fees, checked 2026-11-09): rate = the market's
+  feeCoefficient (0.095 at Tier 1), rounded to the cent per fill, half-to-even.
+  International: rate 0.07 on crypto, unrounded.
+Entries are post-only limit orders (maker, fee 0). Exits are immediate-or-cancel
+limit sells (taker, fee charged). All P&L below includes both.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 
-from ..fees import fee_per_share, walk_sell
+from ..fees import fee_per_share, fee_usdc, walk_sell
 
 
 def round_down(x: float, step: float) -> float:
@@ -33,7 +35,7 @@ class EntryPlan:
 
 
 def plan_entry(*, best_bid: float | None, best_ask: float | None, stake_usd: float, tick: float,
-               min_size: float, style: str = "maker", fee_schedule: dict | None = None,
+               min_size: float, size_step: float = 0.01, style: str = "maker", fee_schedule: dict | None = None,
                max_price: float = 0.97) -> EntryPlan:
     """Choose a limit price and size for a BUY.
 
@@ -54,10 +56,10 @@ def plan_entry(*, best_bid: float | None, best_ask: float | None, stake_usd: flo
     price = round_price(price, tick)
     if price <= 0 or price > max_price:
         return EntryPlan(False, f"entry price {price:.2f} outside (0, {max_price}]")
-    shares = round_down(stake_usd / price, 0.01)
+    shares = round(round_down(stake_usd / price, size_step), 2)
     if shares < min_size:
         return EntryPlan(False, f"${stake_usd:g} buys {shares:.2f} shares < market minimum {min_size:g}")
-    fee = 0.0 if post_only else shares * fee_per_share(price, fee_schedule)
+    fee = 0.0 if post_only else fee_usdc(shares, price, fee_schedule)
     return EntryPlan(True, "", price, shares, round(shares * price, 6), post_only, fee)
 
 
