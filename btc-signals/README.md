@@ -38,7 +38,7 @@ cd btc-signals
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env            # optional: Polymarket API keys for the PolyBolt feed
-python -m pytest                # 114 tests, about 2 s
+python -m pytest                # 133 tests, about 2 s
 python -m app.main              # open http://127.0.0.1:8000
 ```
 
@@ -528,7 +528,7 @@ backtest/sports_report.py  sports CLV/ROI/calibration from recorded data
 app/ingest/us_markets.py  Polymarket US discovery, rules check, order books
 app/trading/us_broker.py  Polymarket US live orders (Ed25519-signed REST)
 backtest/        collect / replay / train / report
-tests/           114 tests: features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
+tests/           133 tests: sports (de-vig, consensus, quotas, exits, CLV), features, TWAP math (Monte Carlo), fees vs docs table, rules, feed
                  parsers and staleness, degraded-data end-to-end, books, model, backtester
 docs/ARCHITECTURE.md   research notes and design
 ```
