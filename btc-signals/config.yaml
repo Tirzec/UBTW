@@ -164,7 +164,7 @@ trading:
   log_file: data/trader.log
   balance_check_s: 30
   entry:
-    stake_usd: 5                   # capped by risk.max_stake_usd
+    stake_usd: 1                   # capped by risk.max_stake_usd (small account: $3.64 funded)
     order_style: maker             # maker = post-only limit at/inside the bid (0 fee, may not fill)
                                    # taker = limit at the ask (fills now, pays the taker fee)
     order_timeout_s: 8             # cancel an unfilled entry after this long
@@ -185,12 +185,12 @@ trading:
     hold_min_ev: 0.02              # hold to resolution only if E[payout] beats selling by this per share
     exit_slippage_ticks: 2         # exit limit = best bid - 2 ticks (marketable, fills now)
     exit_order_timeout_s: 3
-  risk:
-    max_stake_usd: 5
-    daily_loss_limit_usd: 25
+  risk:                            # sized for a $3.64 account (was 5 / 25 / 15 / 10)
+    max_stake_usd: 1
+    daily_loss_limit_usd: 1
     max_consecutive_losses: 5
-    max_total_exposure_usd: 15
-    min_wallet_balance_usd: 10
+    max_total_exposure_usd: 2
+    min_wallet_balance_usd: 1      # stop trading if buying power falls below this
     max_api_errors: 3              # this many errors...
     api_error_window_s: 300        # ...within this window -> pause
 
@@ -214,9 +214,9 @@ notifications:
 modules:
   crypto_updown: {enabled: true}
 
-risk_global:                       # across ALL modules
-  daily_loss_limit_usd: 40
-  max_total_exposure_usd: 60
+risk_global:                       # across ALL modules (small account; was 40 / 60)
+  daily_loss_limit_usd: 1.50
+  max_total_exposure_usd: 3
 
 sports:                            # Polymarket US sports (needs venue: polymarket_us)
   enabled: true
@@ -243,7 +243,7 @@ sports:                            # Polymarket US sports (needs venue: polymark
   gateway_concurrency: 4
   liquidity: {max_spread: 0.03, min_depth: 200}
   entry:
-    stake_usd: 5
+    stake_usd: 1                   # small account (was 5)
     order_style: maker
     order_timeout_s: 60
     max_entries_per_window: 1      # per market
@@ -259,14 +259,14 @@ sports:                            # Polymarket US sports (needs venue: polymark
     hold_min_edge: 0.02
     exit_slippage_ticks: 2
     exit_order_timeout_s: 5
-  risk:
-    max_stake_usd: 10
-    daily_loss_limit_usd: 30
-    max_total_exposure_usd: 40
-    max_exposure_per_game_usd: 15  # every position in one game counts as one exposure
-    max_exposure_per_league_usd: 40
+  risk:                            # small account (was 10 / 30 / 40 / 15 / 40 / 10)
+    max_stake_usd: 1
+    daily_loss_limit_usd: 1
+    max_total_exposure_usd: 2
+    max_exposure_per_game_usd: 1   # every position in one game counts as one exposure
+    max_exposure_per_league_usd: 2
     max_consecutive_losses: 6
-    min_wallet_balance_usd: 10
+    min_wallet_balance_usd: 1
     max_api_errors: 5
     api_error_window_s: 600
   odds:
