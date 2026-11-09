@@ -95,6 +95,7 @@ class TradeStore:
         "venue": "TEXT DEFAULT 'polymarket_intl'", "module": "TEXT DEFAULT 'crypto_updown'",
         "league": "TEXT", "group_key": "TEXT", "bet_type": "TEXT", "confidence": "REAL",
         "starts_at": "REAL", "reasons": "TEXT", "closing_fair": "REAL", "clv": "REAL",
+        "strategy": "TEXT", "time_left_s": "REAL", "side_won": "INTEGER", "fair_at_exit": "REAL",
     }
 
     def __init__(self, db, mode: str, venue: str = "polymarket_intl", module: str = "crypto_updown"):

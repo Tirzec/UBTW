@@ -302,10 +302,20 @@ class AutoTrader:
             return
         side, token = sig.side, sig.token
         book = self.module.book(token) or {"bids": [], "asks": []}
-        plan = plan_entry(best_bid=book["bids"][0][0] if book["bids"] else None,
-                          best_ask=book["asks"][0][0] if book["asks"] else None, stake_usd=stake,
-                          tick=m.tick_size, min_size=m.min_size, size_step=m.size_step,
-                          style=self.ec.get("order_style", "maker"), fee_schedule=m.fee_schedule)
+        limit = (sig.extra or {}).get("limit")
+        if limit is not None:
+            # strategy-chosen limit price (at or slightly below the ask); rests up to order_timeout_s
+            from .rules import EntryPlan, round_down
+            from ..fees import fee_usdc
+            shares = round(round_down(stake / limit, m.size_step), 2)
+            plan = (EntryPlan(True, "", limit, shares, round(shares * limit, 6), False,
+                              fee_usdc(shares, limit, m.fee_schedule)) if shares >= m.min_size
+                    else EntryPlan(False, f"${stake:g} buys {shares:.2f} < minimum {m.min_size:g}"))
+        else:
+            plan = plan_entry(best_bid=book["bids"][0][0] if book["bids"] else None,
+                              best_ask=book["asks"][0][0] if book["asks"] else None, stake_usd=stake,
+                              tick=m.tick_size, min_size=m.min_size, size_step=m.size_step,
+                              style=self.ec.get("order_style", "maker"), fee_schedule=m.fee_schedule)
         if not plan.ok:
             self.status_note = f"{sig.label} {side} signal skipped: {plan.reason}"
             return
@@ -322,9 +332,12 @@ class AutoTrader:
                                       opened_ts=now, league=sig.league, group_key=sig.group or sig.market_id,
                                       bet_type=sig.bet_type, confidence=sig.confidence,
                                       starts_at=sig.starts_at,
+                                      strategy=(sig.extra or {}).get("strategy"),
+                                      time_left_s=(sig.extra or {}).get("time_left"),
                                       reasons=json.dumps([r.as_dict() for r in sig.reasons][:5]))
         o = await self.broker.place_limit(token=token, side="BUY", price=plan.price, size=plan.shares,
-                                          post_only=plan.post_only)
+                                          post_only=plan.post_only,
+                                          ioc=False if limit is not None else None)
         self.store.order(o, pid, "entry")
         self.store.update_position(pid, entry_order=o.order_id)
         self.store.event("order", f"BUY {side} {plan.shares:.2f} @ {plan.price:.2f} "
@@ -408,8 +421,9 @@ class AutoTrader:
         o = await self.broker.place_limit(token=p["token"], side="SELL", price=floor, size=round(shares, 2),
                                           post_only=False)
         self.store.order(o, p["id"], "exit")
+        fair_now, _ = self.module.fair(p)
         self.store.update_position(p["id"], status="closing", exit_order=o.order_id,
-                                   exit_reason=dec.reason, exit_trigger=dec.trigger)
+                                   exit_reason=dec.reason, exit_trigger=dec.trigger, fair_at_exit=fair_now)
         self.store.event("order", f"SELL {p['side']} {shares:.2f} @ >= {floor:.2f}: {dec.reason}",
                          position=p["id"], order=o.order_id, status=o.status)
         if o.status == "rejected":
@@ -483,8 +497,40 @@ class AutoTrader:
             self.store.event("risk", msg, "WARNING")
             self._alert("Risk limit", msg, "warn", "risk")
         self._save()
+        self._self_check(p)
         self._alert(f"Closed {p['duration']} {p['side']}: {pnl:+.2f}",
                     f"{kw.get('exit_reason') or p.get('exit_reason') or ''}. Today {self.risk.state.day_pnl:+.2f}.")
+
+    @staticmethod
+    def _strategy_stats(closed: list[dict]) -> dict:
+        from .summary import strategy_stats
+        out = {}
+        for key in sorted({r.get("strategy") or "legacy" for r in closed} | {"fair_value"}):
+            out[key] = strategy_stats([r for r in closed if (r.get("strategy") or "legacy") == key])
+        return out
+
+    def _self_check(self, p: dict) -> None:
+        """PART 6: after 100 fair-value trades (then every 25), pause if calibration is poor or P&L < 0."""
+        if p.get("strategy") != "fair_value":
+            return
+        from .summary import self_check
+        sc = (self.tc.get("self_check", {}) or {})
+        rows = [r for r in self.store.closed_positions() if r.get("strategy") == "fair_value"]
+        res = self_check(rows, after=int(sc.get("after_trades", 100)), every=int(sc.get("every", 25)),
+                         max_cal_error=float(sc.get("max_calibration_error", 0.10)))
+        if res is None:
+            return
+        st = res["stats"]
+        report = (f"{res['n']} trades, P&L {st['pnl']:+.2f}, win rate {st['win_rate'] or 0:.0%} vs break-even "
+                  f"{(st['break_even_win_rate'] or 0):.0%}, calibration error "
+                  f"{(st['calibration']['error'] or 0):.1%} over {st['calibration']['n']} settled trades")
+        self.store.event("self_check", report, "WARNING", ok=res["ok"], problems=res["problems"])
+        if res["ok"]:
+            self._alert("Self-check passed", report, "info", "summary")
+        else:
+            self._hard_pause("SELF-CHECK FAILED: " + "; ".join(res["problems"]))
+            self._alert("Self-check FAILED - trading paused", report + ". " + "; ".join(res["problems"]),
+                        "warn", "risk")
 
     # ------------------------------------------------------------ snapshot
     def snapshot(self, now: float | None = None) -> dict:
@@ -506,6 +552,7 @@ class AutoTrader:
                                                                        if c["closed_ts"] >= day_start]),
             "paper_trades_done": paper_n,
             "paper_trades_required": self.min_paper,
+            "strategy_stats": self._strategy_stats(closed),
             "paper_count_from": self.paper_since,
             "settings": {"stake": min(float(self.ec.get("stake_usd", 5)), self.risk.max_stake),
                          "order_style": self.ec.get("order_style", "maker"),

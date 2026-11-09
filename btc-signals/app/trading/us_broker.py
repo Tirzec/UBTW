@@ -64,7 +64,7 @@ def format_price(px: float, tick: float) -> str:
 
 
 def order_body(token: str, side: str, price: float, size: float, post_only: bool,
-               tick: float = 0.01) -> dict:
+               tick: float = 0.01, ioc: bool | None = None) -> dict:
     """Build the create-order request (pure; unit-tested).
 
     Entries (post_only) rest as GTC maker-only orders. Non-post-only orders (exits, crossing
@@ -72,13 +72,14 @@ def order_body(token: str, side: str, price: float, size: float, post_only: bool
     second live order behind."""
     slug, leg = split_token(token)
     long_px = price if leg == "long" else 1.0 - price
+    immediate = (not post_only) if ioc is None else (bool(ioc) and not post_only)
     body = {"marketSlug": slug, "type": "ORDER_TYPE_LIMIT",
             "price": {"value": format_price(long_px, tick), "currency": "USD"},
             "quantity": round(size, 2),
-            "tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL" if post_only else "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" if immediate else "TIME_IN_FORCE_GOOD_TILL_CANCEL",
             "intent": INTENTS[(leg, side)], "participateDontInitiate": bool(post_only),
             "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC"}
-    if not post_only:
+    if immediate:
         # docs (orders overview, best practices): use synchronousExecution only for
         # immediately-fillable orders, to wait for the fill confirmation; resting orders stay async
         body["synchronousExecution"] = True
@@ -198,9 +199,11 @@ class UsLiveBroker:
         return r.json() if r.content else {}
 
     async def place_limit(self, *, token: str, side: str, price: float, size: float,
-                          post_only: bool) -> OrderState:
+                          post_only: bool, ioc: bool | None = None) -> OrderState:
+        """post_only: maker-only GTC. Otherwise IOC (default) or, with ioc=False, a GTC limit order
+        that may cross and rests if it doesn't fill (the caller cancels it after a timeout)."""
         o = OrderState("", token, side, price, size, post_only)
-        body = order_body(token, side, price, size, post_only, self.tick_for(token))
+        body = order_body(token, side, price, size, post_only, self.tick_for(token), ioc)
         t0 = time.time()
         try:
             d = await self._req("POST", "/v1/orders", body)

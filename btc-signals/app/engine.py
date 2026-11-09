@@ -178,7 +178,12 @@ class Engine:
         crypto_on = (self.cfg.get("modules", {}) or {}).get("crypto_updown", {}).get("enabled", True)
         self.traders = {}
         if crypto_on:
-            self.trader = AutoTrader(self, self.cfg, broker, self.trade_store, global_risk=self.global_risk)
+            module = None
+            if (self.cfg.get("trading", {}) or {}).get("strategy", "fair_value") == "fair_value":
+                from .modules.crypto_fair import CryptoFairModule
+                module = CryptoFairModule(self, self.cfg)
+            self.trader = AutoTrader(self, self.cfg, broker, self.trade_store, global_risk=self.global_risk,
+                                     module=module)
             self.traders["crypto_updown"] = self.trader
             await self.trader.start()
         await self._start_sports()
@@ -308,6 +313,10 @@ class Engine:
                          h.confidence, json.dumps(h.hits)))
 
     def _on_settled(self, w: Window) -> None:
+        if w.outcome in ("UP", "DOWN"):
+            # calibration needs the outcome of every position's side, including ones sold early
+            self.db.execute("UPDATE bot_positions SET side_won = CASE WHEN side=? THEN 1 ELSE 0 END "
+                            "WHERE slug=? AND side_won IS NULL", (w.outcome, w.slug))
         n = self.paper.settle(w.slug, w.outcome)
         self.db.upsert_window(w)
         if n:

@@ -258,18 +258,45 @@ function renderBot(b) {
     return `<tr><td>#${p.id} ${esc(p.duration)} <b>${esc(p.side)}</b><br><span class="muted">${esc(p.status)} · ${mmss(p.seconds_left)} left</span></td>
       <td class="num">${p.status === "opening" ? `bid ${num(p.entry_price)}` : num(p.entry_price, 3)} × ${num(held || 0, 2)}<br><span class="muted">cost ${usd((p.cost || 0) + (p.entry_fee || 0))}</span></td>
       <td class="num">${p.last_value == null ? "–" : usd(p.last_value)}<br><span class="${cls(p.last_pnl)}">${pn(p.last_pnl)} ${pnlPct == null ? "" : "(" + signed(pnlPct * 100, 1) + "%)"}</span></td>
-      <td class="num trigger">TP bid ≥ ${num(p.tp_price)}<br>SL bid ≤ ${num(p.sl_price)}</td>
+      <td class="num trigger">${p.strategy === "fair_value" ? `fair at entry ${num(p.p_model, 3)}<br>edge ${signed(p.edge, 3)}` : `TP bid ≥ ${num(p.tp_price)}<br>SL bid ≤ ${num(p.sl_price)}`}</td>
       <td class="muted">${esc(p.last_note || p.exit_reason || "")}</td></tr>`;
   }).join("");
   $("bot-positions").innerHTML = ps ? `<div class="table-wrap"><table><tr><th>Position</th><th class="num">Entry × shares</th><th class="num">Sellable now (P&L)</th><th class="num">Triggers</th><th>Status</th></tr>${ps}</table></div>` : '<p class="muted">none</p>';
   const tr = (b.trades || []).slice(0, 25).map((p) => `<tr><td>${new Date(p.closed_ts * 1000).toLocaleTimeString()}</td>
       <td>${esc(p.duration)} <b>${esc(p.side)}</b></td><td class="num">${num(p.entry_price, 3)} → ${p.exit_price ? num(p.exit_price, 3) : (p.payout ? "1.00" : "0.00")}</td>
-      <td class="num ${cls(p.pnl)}">${pn(p.pnl)}</td><td><span class="tag">${esc(p.exit_trigger || "resolution")}</span> <span class="muted">${esc(p.exit_reason || "")}</span></td></tr>`).join("");
+      <td class="num ${cls(p.pnl)}">${pn(p.pnl)}</td><td><span class="tag">${esc(p.exit_trigger || "resolution")}</span> <span class="muted">${esc(p.exit_reason || "")}${p.strategy === "fair_value" ? ` · fair ${num(p.p_model, 3)}, edge ${signed(p.edge, 3)}, ${mmss(p.time_left_s)} left` : ""}</span></td></tr>`).join("");
+  renderFair(b);
   $("bot-trades").innerHTML = tr ? `<div class="table-wrap"><table><tr><th>Closed</th><th>Trade</th><th class="num">Entry → exit</th><th class="num">P&L</th><th>Why it exited</th></tr>${tr}</table></div>` : '<p class="muted">no closed trades yet</p>';
   const need = b.paper_trades_required || 300, done = b.paper_trades_done || 0;
   $("bot-paper").textContent = mode === "paper"
     ? `Paper trades completed: ${done} / ${need} required before live mode can be enabled. Entries are post-only limit orders (0 fee); exits sell at the bid (taker fee). All P&L includes fees.`
     : `LIVE · stake ${usd((b.settings || {}).stake)} · TP +${pct((b.settings || {}).take_profit_pct, 0)} / SL -${pct((b.settings || {}).stop_loss_pct, 0)}`;
+}
+
+function renderFair(b) {
+  const el = $("bot-fair");
+  if (!el) return;
+  const ms = b.module_state || {}, ss = (b.strategy_stats || {}).fair_value || {};
+  const cal = ss.calibration || {}, pn = (x) => (x == null ? "–" : signed(x));
+  const probs = (ms.problems || []).length ? `<p class="bot-state paused">Not trading: ${esc(ms.problems.join("; "))}</p>` : "";
+  const fair = Object.entries(ms.fair || {}).map(([slug, f]) => `<tr><td>${esc(slug)}</td><td class="num">${pct(f.p_up, 1)}</td>
+     <td class="num">${mmss(f.seconds_left)}</td><td class="num">${f.locked}/60</td><td class="num">$${num(f.sigma, 2)}</td></tr>`).join("");
+  const stats = `<div class="stats">
+     <div><span class="label">Trades</span><b>${ss.trades || 0}</b></div>
+     <div><span class="label">Win rate (break-even)</span><b>${ss.trades ? pct(ss.win_rate) : "–"} <span class="muted">(${pct(ss.break_even_win_rate)})</span></b></div>
+     <div><span class="label">Avg win / avg loss</span><b>${pn(ss.avg_win)} / ${pn(ss.avg_loss)}</b></div>
+     <div><span class="label">P&L after fees</span><b class="${(ss.pnl || 0) >= 0 ? "pos" : "neg"}">${pn(ss.pnl)}</b></div></div>`;
+  const bars = (cal.buckets || []).map((c) => `<tr><td>${esc(c.bucket)}</td><td class="num">${c.n}</td>
+     <td><div style="background:#3b82f6;height:8px;width:${Math.round(c.predicted * 100)}%"></div>
+         <div style="background:#22c55e;height:8px;width:${Math.round(c.actual * 100)}%;margin-top:2px"></div></td>
+     <td class="num">${pct(c.predicted)} → ${pct(c.actual)}</td></tr>`).join("");
+  const calHtml = bars ? `<div class="table-wrap"><table><tr><th>Predicted</th><th class="num">n</th><th>blue = predicted, green = actual win rate</th><th class="num"></th></tr>${bars}</table></div>
+     <p class="muted">Calibration error ${cal.error == null ? "–" : pct(cal.error, 1)} over ${cal.n} settled trades.</p>`
+     : '<p class="muted">Calibration chart appears once trades have settled.</p>';
+  const arb = Object.entries(ms.arbitrage || {}).map(([d, a]) => `${d}: best UP+DOWN ask sum ${a.best_sum == null ? "–" : "$" + num(a.best_sum, 3)}, ${a.opportunities} opportunities in ${a.checks} checks`).join(" · ");
+  el.innerHTML = probs + stats + (fair ? `<div class="table-wrap"><table><tr><th>Window</th><th class="num">Fair P(UP)</th><th class="num">Left</th><th class="num">Locked</th><th class="num">Vol /√s</th></tr>${fair}</table></div>` : "")
+    + "<h3>Calibration</h3>" + calHtml
+    + `<h3>Arbitrage (UP + DOWN)</h3><p class="muted">${arb || "no data yet"}. On Polymarket US both sides share one order book, so this sum is always above $1; logged only.</p>`;
 }
 
 $("bot-stop").onclick = async () => {

@@ -79,7 +79,7 @@ class PaperBroker:
         self.ioc_non_post_only = ioc_non_post_only
 
     async def place_limit(self, *, token: str, side: str, price: float, size: float,
-                          post_only: bool) -> OrderState:
+                          post_only: bool, ioc: bool | None = None) -> OrderState:
         o = OrderState(f"paper-{uuid.uuid4().hex[:12]}", token, side, price, size, post_only)
         book = self.get_book(token) or {"bids": [], "asks": []}
         opp = book["asks"] if side == "BUY" else book["bids"]
@@ -99,7 +99,7 @@ class PaperBroker:
                 o.fee += fee_usdc(take, p, sched)
         if o.filled >= o.size - 1e-9:
             o.status = "filled"
-        elif not post_only and self.ioc_non_post_only:
+        elif not post_only and (ioc if ioc is not None else self.ioc_non_post_only):
             o.status = "canceled"          # immediate-or-cancel: the unfilled rest never rests
         else:
             o.status = "partial" if o.filled else "live"
@@ -191,7 +191,7 @@ class LiveBroker:
         return BrokerError(f"{name}: {msg}"[:300])
 
     async def place_limit(self, *, token: str, side: str, price: float, size: float,
-                          post_only: bool) -> OrderState:
+                          post_only: bool, ioc: bool | None = None) -> OrderState:
         o = OrderState("", token, side, price, size, post_only)
         try:
             r = await self.client.place_limit_order(asset_id=token, side=side, price=f"{price:.2f}",
