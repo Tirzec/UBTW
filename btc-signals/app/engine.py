@@ -95,6 +95,9 @@ class Engine:
         self._was_degraded = None
         self.loop_lag_ms = 0.0
         self.trader = None
+        self.traders: dict = {}
+        self.sports = None
+        self.global_risk = None
         tc = cfg.get("trading", {}) or {}
         self.trading_enabled = bool(tc.get("enabled", True))
         mode = "live" if cfg.get("_live_confirmed") else "paper"
@@ -137,8 +140,63 @@ class Engine:
             broker = await LiveBroker.connect(creds["private_key"], creds["wallet"], self.fee_schedule_for)
         else:
             broker = PaperBroker(self.clob.store.get, self.clob.store.trades_since, self.fee_schedule_for)
-        self.trader = AutoTrader(self, self.cfg, broker, self.trade_store)
-        await self.trader.start()
+        from .trading.risk import GlobalRisk
+        self.global_risk = GlobalRisk(self.cfg.get("risk_global", {}))
+        crypto_on = (self.cfg.get("modules", {}) or {}).get("crypto_updown", {}).get("enabled", True)
+        self.traders = {}
+        if crypto_on:
+            self.trader = AutoTrader(self, self.cfg, broker, self.trade_store, global_risk=self.global_risk)
+            self.traders["crypto_updown"] = self.trader
+            await self.trader.start()
+        await self._start_sports()
+
+    async def _start_sports(self) -> None:
+        """Sports module: Polymarket US only. Live only after its own 200-paper-trade gate."""
+        sc = self.cfg.get("sports", {}) or {}
+        if not sc.get("enabled", False):
+            return
+        if self.venue != "polymarket_us":
+            log.warning("sports module needs venue: polymarket_us; not started")
+            return
+        from .modules.sports.module import SportsModule
+        from .trading.broker import PaperBroker
+        from .trading.store import TradeStore
+        from .trading.trader import AutoTrader
+        need = int(sc.get("min_paper_trades_for_live", 200))
+        paper_done = len(TradeStore(self.db, "paper", self.venue, "sports").closed_positions())
+        mode = "paper"
+        if self.trade_mode == "live" and sc.get("live_enabled", False):
+            if paper_done >= need:
+                mode = "live"
+            else:
+                log.warning("sports stays in PAPER: %d/%d paper trades completed", paper_done, need)
+        self.sports = SportsModule(self, self.cfg, self.http)
+        store = TradeStore(self.db, mode, self.venue, "sports")
+        self.sports.attach(store)
+        fee_for = lambda tok: (self.sports.market_index.get(tok.rsplit(":", 1)[0]).fee_schedule  # noqa: E731
+                               if self.sports.market_index.get(tok.rsplit(":", 1)[0]) else {})
+        if mode == "live":
+            from .trading.us_broker import UsLiveBroker
+            creds = self.cfg["_live_confirmed"]
+            broker = UsLiveBroker(creds["key_id"], creds["secret_key"], fee_for,
+                                  base=self.cfg.get("polymarket_us", {}).get("api_url", "https://api.polymarket.us"))
+        else:
+            broker = PaperBroker(self.sports.books.get, self.sports.books.trades_since, fee_for)
+        t = AutoTrader(self, self.cfg, broker, store, module=self.sports, exec_conf=sc,
+                       global_risk=self.global_risk, min_paper_trades=need)
+        self.traders["sports"] = t
+        await self.sports.start()
+        await t.start()
+
+    async def kill_all(self, reason: str) -> int:
+        n = 0
+        for t in self.traders.values():
+            n += await t.kill(reason)
+        return n
+
+    def resume_all(self) -> None:
+        for t in self.traders.values():
+            t.resume()
 
     async def _guard(self, name: str, coro) -> None:
         try:
@@ -149,8 +207,10 @@ class Engine:
             log.exception("task %s crashed", name)
 
     async def stop(self) -> None:
-        if self.trader:
-            await self.trader.stop()
+        for t in getattr(self, "traders", {}).values():
+            await t.stop()
+        if getattr(self, "sports", None) is not None:
+            await self.sports.stop()
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -457,6 +517,34 @@ class Engine:
             self._stats_cache = (time.time(), s)
         return s
 
+    def _modules_snapshot(self, now: float) -> dict:
+        out = {}
+        for name, t in getattr(self, "traders", {}).items():
+            snap = t.snapshot(now)
+            snap["module_state"] = t.module.snapshot()
+            snap["by_league"] = self._breakdown(t, "league")
+            snap["by_bet_type"] = self._breakdown(t, "bet_type")
+            out[name] = snap
+        if getattr(self, "global_risk", None) is not None:
+            out["_global"] = self.global_risk.summary(now)
+        return out
+
+    @staticmethod
+    def _breakdown(t, col: str) -> dict:
+        from .trading.store import bot_stats
+        rows = t.store.closed_positions()
+        groups: dict = {}
+        for r in rows:
+            groups.setdefault(r.get(col) or "-", []).append(r)
+        out = {}
+        for k, rs in groups.items():
+            st = bot_stats(rs)
+            clvs = [r["clv"] for r in rs if r.get("clv") is not None]
+            st["avg_clv"] = sum(clvs) / len(clvs) if clvs else None
+            st["clv_n"] = len(clvs)
+            out[k] = st
+        return out
+
     def snapshot(self) -> dict:
         now = time.time()
         ref = self.feeds.reference(now)
@@ -512,5 +600,6 @@ class Engine:
             "notifications": self.notifier.status(),
             "alerts": list(self.alerts)[-20:],
             "bot": self.trader.snapshot(now) if self.trader else {"mode": "off"},
+            "modules": self._modules_snapshot(now),
             "venue": self.venue,
         }

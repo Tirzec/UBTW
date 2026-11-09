@@ -205,3 +205,99 @@ notifications:
   kinds: [signal, exit, degraded, rules, trade, risk]
   min_interval_s: 2
   click_url: ""                    # optional: link opened when you tap the notification
+
+# ---------------------------------------------------------------------------
+# Strategy modules (shared executor, risk, kill switch, paper/live, logging)
+# ---------------------------------------------------------------------------
+modules:
+  crypto_updown: {enabled: true}
+
+risk_global:                       # across ALL modules
+  daily_loss_limit_usd: 40
+  max_total_exposure_usd: 60
+
+sports:                            # Polymarket US sports (needs venue: polymarket_us)
+  enabled: true
+  live_enabled: false              # LIVE also needs trading.mode: live and 200 paper sports trades
+  min_paper_trades_for_live: 200
+  leagues:                         # Polymarket US league slugs; buffer = required edge per league
+    nfl: {enabled: true, buffer: 0.07}
+    nba: {enabled: true, buffer: 0.07}
+    nhl: {enabled: true, buffer: 0.07}
+    epl: {enabled: true, buffer: 0.07}
+    mlb: {enabled: false, buffer: 0.07}
+    cfb: {enabled: false, buffer: 0.08}
+    cbb: {enabled: false, buffer: 0.08}
+    mls: {enabled: false, buffer: 0.08}
+    ucl: {enabled: false, buffer: 0.07}
+  bet_types: [moneyline, spread, total]     # no props
+  edge_buffer: 0.07                # default buffer (free odds are delayed)
+  no_entry_before_start_min: 15    # no entries in the last 15 min unless Pinnacle confirms
+  live_betting: false              # no in-game trading
+  lookahead_hours: 36
+  event_refresh_s: 600
+  book_refresh_s: 60
+  eval_interval_s: 15
+  gateway_concurrency: 4
+  liquidity: {max_spread: 0.03, min_depth: 200}
+  entry:
+    stake_usd: 5
+    order_style: maker
+    order_timeout_s: 60
+    max_entries_per_window: 1      # per market
+    reentry_cooldown_s: 900
+  exits:
+    check_interval_s: 1
+    take_profit_pct: 0.10          # sell at +10% after fees...
+    fair_buffer: 0.0               # ...or when the bid nets >= fair value
+    stop_fair_drop: 0.05           # sell if fair value falls 5 pts below fair at entry
+    stop_loss_pct: 0.25            # (display only for sports; the fair-value stop is the rule)
+    sell_before_start_min: 5       # at start: hold if edge persists, otherwise sell before start
+    hold_if_edge: true
+    hold_min_edge: 0.02
+    exit_slippage_ticks: 2
+    exit_order_timeout_s: 5
+  risk:
+    max_stake_usd: 10
+    daily_loss_limit_usd: 30
+    max_total_exposure_usd: 40
+    max_exposure_per_game_usd: 15  # every position in one game counts as one exposure
+    max_exposure_per_league_usd: 40
+    max_consecutive_losses: 6
+    min_wallet_balance_usd: 10
+    max_api_errors: 5
+    api_error_window_s: 600
+  odds:
+    method: power                  # de-vig: power | multiplicative
+    min_books: 2
+    max_quote_age_s: 2700
+    sharpapi_refresh_s: 120
+    schedule:                      # TheRundown refresh cadence per league (data-point budget)
+      far_refresh_s: 10800
+      near_window_h: 2
+      near_refresh_s: 1800
+      closing_capture_min: 10
+      closing_refresh_s: 600
+      idle_refresh_s: 14400
+    pinnacle_check: {window_min: 60, max_disagree: 0.03}
+    sources:
+      therundown:                  # free: 20k/day + 200k/month data points, 5-min delay
+        enabled: true
+        key_env: THERUNDOWN_API_KEY
+        min_interval_s: 1.2
+        budget: {day: 18000, month: 190000, reserve: 1500}
+      sharpapi:                    # free: 12 req/min, 60-s delay, DraftKings + FanDuel
+        enabled: true
+        key_env: SHARPAPI_KEY
+        min_interval_s: 6
+        max_pages: 4
+        budget: {}
+      theoddsapi:                  # free: 500 credits/month; Pinnacle checks only
+        enabled: true
+        key_env: THE_ODDS_API_KEY
+        min_interval_s: 1.5
+        budget: {month: 500, reserve: 25}
+  research:
+    injuries_ttl_s: 600
+    news_ttl_s: 300
+    weather: true

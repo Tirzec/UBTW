@@ -87,18 +87,18 @@ def create_app(cfg: dict | None = None, start_engine: bool = True) -> FastAPI:
 
     @app.post("/api/bot/stop")
     async def bot_stop():
-        t = app.state.engine.trader
-        if t is None:
+        e = app.state.engine
+        if not e.traders:
             raise HTTPException(400, "auto-trader not running")
-        n = await t.kill("STOP button on dashboard")
+        n = await e.kill_all("STOP button on dashboard")
         return {"ok": True, "canceled": n}
 
     @app.post("/api/bot/resume")
     async def bot_resume():
-        t = app.state.engine.trader
-        if t is None:
+        e = app.state.engine
+        if not e.traders:
             raise HTTPException(400, "auto-trader not running")
-        t.resume()
+        e.resume_all()
         return {"ok": True}
 
     @app.get("/api/bot/trades")
