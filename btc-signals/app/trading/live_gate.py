@@ -162,7 +162,11 @@ def _check_us(cfg, tc, n, need, stats, problems, interactive, input_fn, account_
     from .live_phase import PHASE1_MAX_DAILY_LOSS_USD, PHASE1_MAX_STAKE_USD, PHASE1_MAX_TRADES_PER_DAY
     print(f"\nAccount: {account}")
     print(f"LIVE PHASE 1 hard limits (config can only lower them): stake <= ${PHASE1_MAX_STAKE_USD:g}, "
-          f"daily loss <= ${PHASE1_MAX_DAILY_LOSS_USD:g}, <= {PHASE1_MAX_TRADES_PER_DAY} live trades/day. "
+          f"daily loss <= ${PHASE1_MAX_DAILY_LOSS_USD:g}, "
+          + (f"<= {PHASE1_MAX_TRADES_PER_DAY} live trades/day. "
+             if (tc.get("live_phase1", {}) or {}).get("max_trades_per_day", 10) not in (None, False, "off", "none")
+             else "no daily trade cap (switched off). ")
+          + 
           "Positions are reconciled with the exchange every 60 s; any mismatch halts trading.")
     print(f"Risk limits: max stake ${rc.get('max_stake_usd', 5)}, daily loss limit "
           f"${rc.get('daily_loss_limit_usd', 25)}, max {rc.get('max_consecutive_losses', 5)} losses in a "

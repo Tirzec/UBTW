@@ -3,7 +3,8 @@
 While `trading.live_phase` is 1 (the only phase that exists so far), LIVE trading is capped at:
   - stake per trade         <= $1 (and config's own max_stake_usd if lower)
   - daily loss, all modules <= $10 (and config's own limits if lower)
-  - live entries per day    <= 10, across crypto + sports, no matter what config says
+  - live entries per day    <= 10, across crypto + sports, unless live_phase1.max_trades_per_day is
+                               set to off (user's choice 2026-11-10); it can never be raised above 10
 These numbers are in code on purpose: raising them means changing this file, not a setting.
 """
 from __future__ import annotations
@@ -32,8 +33,11 @@ def apply_phase1(cfg: dict) -> dict:
         entry["stake_usd"] = min(float(entry.get("stake_usd", PHASE1_MAX_STAKE_USD)), PHASE1_MAX_STAKE_USD)
     rg["daily_loss_limit_usd"] = min(float(rg.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD)),
                                      PHASE1_MAX_DAILY_LOSS_USD)
-    wanted = int((tc.get("live_phase1", {}) or {}).get("max_trades_per_day", PHASE1_MAX_TRADES_PER_DAY))
-    rg["max_trades_per_day"] = max(0, min(wanted, PHASE1_MAX_TRADES_PER_DAY))
+    wanted = (tc.get("live_phase1", {}) or {}).get("max_trades_per_day", PHASE1_MAX_TRADES_PER_DAY)
+    if wanted in (None, False, "off", "none"):
+        rg["max_trades_per_day"] = None                    # switched off by the user
+    else:
+        rg["max_trades_per_day"] = max(0, min(int(wanted), PHASE1_MAX_TRADES_PER_DAY))
     return {"phase": 1, "max_stake_usd": tc["risk"]["max_stake_usd"],
             "daily_loss_limit_usd": rg["daily_loss_limit_usd"],
             "max_trades_per_day": rg["max_trades_per_day"]}

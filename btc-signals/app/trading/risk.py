@@ -28,7 +28,8 @@ class RiskState:
     day: str = ""
     day_pnl: float = 0.0
     day_trades: int = 0
-    day_stopped_until: float = 0.0   # daily loss limit hit
+    day_stopped_until: float = 0.0   # daily loss limit hit / losing streak (stop_for_day)
+    day_stop_reason: str = ""        # "loss_limit" | "streak"
     consecutive_losses: int = 0
     api_errors: list[float] = field(default_factory=list)
     maintenance_until: float = 0.0   # matching engine restart / post-only mode
@@ -43,6 +44,8 @@ class RiskManager:
         self.max_stake = float(conf.get("max_stake_usd", 5))
         self.daily_loss_limit = float(conf.get("daily_loss_limit_usd", 25))
         self.max_consecutive = int(conf.get("max_consecutive_losses", 5))
+        # "pause" (halt until Resume) or "stop_for_day" (no entries until local midnight, then automatic)
+        self.streak_action = str(conf.get("losing_streak_action", "pause"))
         self.max_exposure = float(conf.get("max_total_exposure_usd", 15))
         self.min_balance = float(conf.get("min_wallet_balance_usd", 10))
         self.max_api_errors = int(conf.get("max_api_errors", 3))
@@ -56,6 +59,9 @@ class RiskManager:
             self.state.day, self.state.day_pnl, self.state.day_trades = d, 0.0, 0
             if self.state.day_stopped_until and now >= self.state.day_stopped_until:
                 self.state.day_stopped_until = 0.0
+                if self.state.day_stop_reason == "streak":
+                    self.state.consecutive_losses = 0       # a new day starts a new streak count
+                self.state.day_stop_reason = ""
 
     # ---------------------------------------------------------------- events
     def halt(self, reason: str) -> None:
@@ -76,12 +82,20 @@ class RiskManager:
         alerts = []
         if s.day_pnl <= -self.daily_loss_limit and not s.day_stopped_until:
             s.day_stopped_until = next_local_midnight(now)
+            s.day_stop_reason = "loss_limit"
             alerts.append(f"Daily loss limit hit ({s.day_pnl:+.2f} <= -{self.daily_loss_limit:g}). "
                           "No new trades until tomorrow.")
-        if s.consecutive_losses >= self.max_consecutive and not s.halted:
-            self.halt(f"{s.consecutive_losses} losses in a row")
-            alerts.append(f"Paused after {s.consecutive_losses} consecutive losses. "
-                          "Review, then press Resume.")
+        if s.consecutive_losses >= self.max_consecutive:
+            if self.streak_action == "stop_for_day":
+                if not s.day_stopped_until:
+                    s.day_stopped_until = next_local_midnight(now)
+                    s.day_stop_reason = "streak"
+                    alerts.append(f"{s.consecutive_losses} losses in a row: stopped for today, "
+                                  "trading resumes automatically after midnight.")
+            elif not s.halted:
+                self.halt(f"{s.consecutive_losses} losses in a row")
+                alerts.append(f"Paused after {s.consecutive_losses} consecutive losses. "
+                              "Review, then press Resume.")
         return alerts
 
     def record_api_error(self, now: float) -> str | None:
@@ -108,7 +122,8 @@ class RiskManager:
         if s.halted:
             out.append(f"HALTED: {s.halt_reason}")
         if s.day_stopped_until and now < s.day_stopped_until:
-            out.append(f"daily loss limit hit ({s.day_pnl:+.2f}); resumes tomorrow")
+            out.append(f"{s.consecutive_losses} losses in a row; resumes tomorrow" if s.day_stop_reason == "streak"
+                       else f"daily loss limit hit ({s.day_pnl:+.2f}); resumes tomorrow")
         if s.maintenance_until and now < s.maintenance_until:
             out.append("Polymarket matching engine maintenance")
         if degraded:

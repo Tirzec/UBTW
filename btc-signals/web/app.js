@@ -234,7 +234,7 @@ function renderBot(b) {
   const r = b.risk || {};
   const line = $("bot-status-line");
   if (r.halted) { line.textContent = "HALTED: " + r.halt_reason; line.className = "bot-state halted"; }
-  else if (r.day_stopped) { line.textContent = "Stopped for today: daily loss limit hit"; line.className = "bot-state paused"; }
+  else if (r.day_stopped) { line.textContent = r.day_stop_reason === "streak" ? `Stopped for today: ${r.consecutive_losses} losses in a row (resumes after midnight)` : "Stopped for today: daily loss limit hit"; line.className = "bot-state paused"; }
   else { line.textContent = mode === "live" ? "Trading with REAL money" : "Paper trading (simulated fills on the real order book)"; line.className = "bot-state running"; }
   $("bot-resume").classList.toggle("hidden", !(r.halted || r.day_stopped));
   $("bot-resume").disabled = !r.halted;

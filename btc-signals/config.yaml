@@ -165,7 +165,7 @@ trading:
   live_phase: 1                    # first live phase: hard caps in app/trading/live_phase.py
                                    # ($1 stake, $10/day loss, 10 live trades/day; config can only lower them)
   live_phase1:
-    max_trades_per_day: 10         # may be lowered, never raised above 10
+    max_trades_per_day: off        # user's choice 2026-11-10: no daily trade cap (was 10; can't be set above 10)
   reconcile_interval_s: 60         # compare bot vs exchange positions/orders; mismatch twice -> halt
   log_file: data/trader.log
   balance_check_s: 30
@@ -182,7 +182,8 @@ trading:
   risk:
     max_stake_usd: 1
     daily_loss_limit_usd: 10       # then stop for the day (phase-1 hard cap is 10)
-    max_consecutive_losses: 4      # pause + alert after 4 losses in a row
+    max_consecutive_losses: 4      # 4 losses in a row ...
+    losing_streak_action: stop_for_day   # ... stop for the rest of the day (auto-resume after midnight)
     max_total_exposure_usd: 5
     min_wallet_balance_usd: 1      # stop trading if buying power falls below this
     max_api_errors: 3              # this many errors...

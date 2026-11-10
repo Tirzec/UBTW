@@ -199,3 +199,32 @@ def test_parse_trades_filters():
         {"accountBalanceChange": {}}]}
     t = parse_trades(d, "m")
     assert len(t) == 1 and t[0]["price"] == 0.74 and t[0]["aggressor"]
+
+
+def test_trade_cap_can_be_switched_off_but_not_raised():
+    for off in (False, None, "off"):
+        cfg = {"trading": {"live_phase1": {"max_trades_per_day": off}}}
+        assert apply_phase1(cfg)["max_trades_per_day"] is None
+        g = GlobalRisk(cfg["risk_global"], trades_today_fn=lambda: 999)
+        assert g.entry_blockers(time.time(), 1.0) == []
+    assert apply_phase1({"trading": {"live_phase1": {"max_trades_per_day": 50}}})["max_trades_per_day"] == 10
+
+
+def test_losing_streak_stops_for_the_day_then_resumes_automatically():
+    from app.trading.risk import RiskManager
+    rm = RiskManager({"max_consecutive_losses": 4, "losing_streak_action": "stop_for_day",
+                      "daily_loss_limit_usd": 10})
+    now = time.mktime(time.strptime("2026-11-10 14:00", "%Y-%m-%d %H:%M"))
+    for _ in range(3):
+        assert rm.record_close(-0.2, now) == []
+    alerts = rm.record_close(-0.2, now)
+    assert alerts and "stopped for today" in alerts[0] and not rm.state.halted
+    kw = dict(stake=1, open_exposure=0, window_busy=False, degraded=False)
+    assert any("4 losses in a row; resumes tomorrow" in b for b in rm.entry_blockers(now=now + 60, **kw))
+    tomorrow = now + 12 * 3600
+    assert rm.entry_blockers(now=tomorrow, **kw) == []
+    assert rm.state.consecutive_losses == 0 and rm.state.day_stop_reason == ""
+    old = RiskManager({"max_consecutive_losses": 4})                      # default still pauses
+    for _ in range(4):
+        old.record_close(-0.2, now)
+    assert old.state.halted
