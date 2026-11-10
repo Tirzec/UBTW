@@ -48,6 +48,7 @@ def _module(now, p_up, up_book, dn_book, dur="15m", problems=()):
     m._update = lambda now: None
     m.problems = list(problems)
     m.fair_now = {w.slug: FairValue(p_up, 100, 1, 0, w.end - now, 1)}
+    m._precompute(now)                                      # per-second plan (normally done by _update)
     return m, w
 
 
@@ -64,6 +65,10 @@ def test_entry_rules():
     assert s.extra["limit"] == 0.59                         # moderate edge: one tick below the ask
     m, w = _module(now, 0.90, book(0.58, 0.60), book(0.40, 0.42))
     assert m.signals(now)[0].extra["limit"] == 0.60         # big edge: at the ask
+    m, w = _module(now, 0.71, book(0.58, 0.60), book(0.40, 0.42))
+    s = m.signals(now)[0]
+    assert s.edge >= 0.08 and s.extra["limit"] == 0.60      # 8+ points: at the ask so it fills now
+    assert s.extra["ask"] == 0.60 and s.extra["book_ts"] == now
     m, _ = _module(now, 0.66, book(0.58, 0.60), book(0.40, 0.42))
     assert m.signals(now) == []                             # edge 0.037 < 0.05 after fees
     m, _ = _module((now // L) * L + 100, 0.9, book(0.58, 0.60), book(0.40, 0.42))

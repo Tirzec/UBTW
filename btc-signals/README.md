@@ -158,12 +158,24 @@ Known limitations on Polymarket US:
 **Entry and exit rules (fair-value strategy, 2026-11-10).** Only sides priced 55c-93c are bought (the model
 overestimates cheap sides: see docs/FAIR_VALUE_RESULTS.md); one entry per settlement time (5m and 15m windows that
 overlap count as one); 30-minute warm-up after every start (the full volatility look-back; warm-up blocks
-entries only, never forces an exit). Exits: resting SELL at min(entry + 10c, 96c); bid >= entry + 6c with < 3
-points of edge left sells; true probability < 30% sells at the bid; 93c lock-in (only in profit); late-window exit.
+entries only, never forces an exit). Exits (rules v2, 2026-11-10): resting SELL at max(entry + 25c, fair value + 3c),
+capped at 95c and moved as fair value changes; otherwise hold toward resolution while the model's probability is
+above the bid. Early sells only when the bid (after fees) is above fair value, at a 93c+ bid (lock-in, only in
+profit), or late in the window; true probability < 30% sells at the bid. (The old +6c quick exit and entry + 10c
+resting sell are gone.)
+
+**Fast entries (rules v2).** Entries are checked on every order-book update (WebSocket, or poll fallback), not on
+a timer; everything that only changes once a second (fair value, price to beat, thresholds, fees, stake) is
+precomputed. With 8+ points of edge the buy goes in AT the best ask (fills now); smaller edges quote one tick
+under. An unfilled entry is cancelled after 3 s and re-quoted on the next update if the edge is still there.
+Book update -> order time is logged; a median over 300 ms alerts your phone. Every signal and why it was or
+wasn't taken goes to `bot_signals`. `python -m app.trader execution --live` (Windows: `.\windows\execution.bat`)
+shows entry timings, unfilled cancels, missed signal windows, profit left on the table by early sales, and old vs
+new rules; after 50 trades on the new rules the bot sends that comparison to your phone once.
 `python -m app.trader entries --live` (Windows: `.\windows\entries.bat`) explains every entry below 30c and
 compares results below 30c vs above 50c.
 
-**Fast exits (fair-value strategy).** A resting SELL for the whole position at 96c is placed the moment a
+**Fast exits (fair-value strategy).** A resting SELL for the whole position (see above) is placed the moment a
 position opens (fills with no reaction delay); bid >= 93c sells immediately unless the averaging window
 has started and fair > 99%; a profitable position with < 45 s (5m) / 90 s (15m) left sells at a bid >= 85c.
 Open positions are checked every 250 ms and their books polled ~4x a second; with API keys, books stream

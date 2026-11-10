@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS bot_ticks (
   fair REAL, decision TEXT, trigger TEXT, book_ts REAL, seconds_left REAL
 );
 CREATE INDEX IF NOT EXISTS bot_ticks_pos ON bot_ticks(position_id, ts);
+CREATE TABLE IF NOT EXISTS bot_signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, mode TEXT, slug TEXT, side TEXT, edge REAL, ask REAL,
+  fair REAL, decision TEXT, reason TEXT, rules TEXT, position_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS bot_signals_ts ON bot_signals(ts);
 """
 
 SECRET_ENV = ("POLYMARKET_PRIVATE_KEY", "POLYMARKET_SECRET_KEY", "POLYMARKET_KEY_ID", "THERUNDOWN_API_KEY", "SHARPAPI_KEY",
@@ -102,6 +107,7 @@ class TradeStore:
         "starts_at": "REAL", "reasons": "TEXT", "closing_fair": "REAL", "clv": "REAL",
         "strategy": "TEXT", "time_left_s": "REAL", "side_won": "INTEGER", "fair_at_exit": "REAL",
         "lock_order": "TEXT", "lock_filled": "REAL", "lock_notional": "REAL", "lock_fee": "REAL",
+        "rules": "TEXT", "signal_ask": "REAL", "signal_book_ts": "REAL", "order_sent_ts": "REAL",
     }
 
     def __init__(self, db, mode: str, venue: str = "polymarket_intl", module: str = "crypto_updown"):
@@ -173,6 +179,13 @@ class TradeStore:
         cols = ["ts", "position_id"] + list(kw)
         self.db.execute(f"INSERT INTO bot_ticks ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                         (time.time(), position_id, *kw.values()))
+
+    def signal(self, **kw) -> None:
+        """Signal log: every entry signal and what happened to it (entered / skipped and why)."""
+        kw.setdefault("mode", self.mode)
+        cols = ["ts"] + list(kw)
+        self.db.execute(f"INSERT INTO bot_signals ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                        (time.time(), *kw.values()))
 
     def counted_paper_trades(self, since: float = 0.0) -> list[dict]:
         """Closed PAPER trades opened at/after `since` (the live-readiness count)."""

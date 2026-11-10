@@ -106,6 +106,30 @@ class CryptoFairModule(StrategyModule):
         if sec % 30 == 0 and self.fair_now:
             self.sigma_hist.append((now, next(iter(self.fair_now.values())).sigma))
         self._arb_watch(now)
+        self._precompute(now)
+        self._readiness(now)
+
+    def _precompute(self, now: float) -> None:
+        """Once per second: everything that does not change between book updates (window, price to beat
+        and fair value, thresholds, fee schedule, entry times, stake), so the per-book-update path is just
+        'read best ask/bid -> edge -> order'."""
+        f = self.fc
+        thr = float(f.get("min_edge", 0.05))
+        tr = getattr(self.engine, "trader", None)
+        stake = (tr.stake_now() if tr is not None and hasattr(tr, "stake_now") else None) \
+            or float(self.ec.get("stake_usd", 1) or 1)
+        plan = []
+        for dur in sorted(self.engine.durations, key=lambda d: 0 if d == "15m" else 1):   # prefer 15m
+            w = self.engine.discovery.current(dur, now)
+            L = w.end - w.start
+            plan.append({"dur": dur, "w": w, "fv": self.fair_now.get(w.slug),
+                         "need": thr * (float(f.get("five_min_multiplier", 2.0)) if dur == "5m" else 1.0),
+                         "open_from": w.start + L / 3, "close_at": w.end - float(f.get("no_entry_last_s", 5)),
+                         "stake": stake})
+        self._plan = plan
+        self._consts = {"min_p": float(f.get("min_price", 0.55)), "max_p": float(f.get("max_price", 0.93)),
+                        "max_age": float(f.get("max_book_age_s", 5)),
+                        "take_ask": float(f.get("take_ask_edge", 0.08))}
 
     def _data_problems(self, now: float, xs) -> list[str]:
         f, out = self.fc, []
@@ -183,55 +207,52 @@ class CryptoFairModule(StrategyModule):
         self.ready = out
 
     def signals(self, now: float) -> list[Signal]:
+        """Called on EVERY order-book update (and at least once a second): fair values and thresholds are
+        precomputed once per second in _update; this only reads the books."""
         self._update(now)
-        self._readiness(now)
         if self.problems:
             return []
         out = []
-        f = self.fc
-        thr = float(f.get("min_edge", 0.05))
-        for dur in sorted(self.engine.durations, key=lambda d: 0 if d == "15m" else 1):   # prefer 15m
-            w = self.engine.discovery.current(dur, now)
-            fv = self.fair_now.get(w.slug)
-            need = thr * (float(f.get("five_min_multiplier", 2.0)) if dur == "5m" else 1.0)
-            L = w.end - w.start
+        c = getattr(self, "_consts", None)
+        if c is None:
+            return []
+        for pl in getattr(self, "_plan", []):
+            w, fv, need, dur = pl["w"], pl["fv"], pl["need"], pl["dur"]
             if fv is None or not w.accepting_orders or (w.rules is not None and not w.rules.ok):
                 continue
-            if now < w.start + L / 3 or now > w.end - float(f.get("no_entry_last_s", 5)):
-                self.notes[dur] = "first third of the window" if now < w.start + L / 3 else "window ending"
+            if now < pl["open_from"] or now > pl["close_at"] or now >= w.end:
+                self.notes[dur] = "first third of the window" if now < pl["open_from"] else "window ending"
                 continue
             best = None
             for side, tok in (("UP", w.token_up), ("DOWN", w.token_down)):
                 bk = self.book(tok)
                 if not bk or not bk["asks"] or not bk["bids"]:
                     continue
-                if now - (bk.get("updated") or 0) > float(f.get("max_book_age_s", 5)):
+                if now - (bk.get("updated") or 0) > c["max_age"]:
                     continue
                 ask, ask_sz = bk["asks"][0]
                 bid, bid_sz = bk["bids"][0]
-                if not float(f.get("min_price", 0.55)) <= ask <= float(f.get("max_price", 0.93)):
+                if not c["min_p"] <= ask <= c["max_p"]:
                     continue                              # no long shots (and nothing above 93c)
                 p = fv.p_side(side)
                 edge = p - ask - fee_per_share(ask, w.fee_schedule)
-                tr = getattr(self.engine, "trader", None)
-                stake = (tr.stake_now() if tr is not None and hasattr(tr, "stake_now") else None) \
-                    or float(self.ec.get("stake_usd", 1) or 1)
-                shares = stake / ask
-                depth_bid = sum(s for px, s in bk["bids"] if px >= bid - 3 * w.tick_size)
                 if edge < need:
                     continue
+                shares = pl["stake"] / ask
+                depth_bid = sum(s for px, s in bk["bids"] if px >= bid - 3 * w.tick_size)
                 if depth_bid < shares or ask_sz < min(shares, 1):
                     self.notes[dur] = f"{side} edge {edge:+.3f} but book too thin to exit"
                     continue
-                limit = ask if edge >= 2 * need else max(round(ask - w.tick_size, 4), round(bid + w.tick_size, 4))
+                # big edge (8+ points): pay the ask so it fills now; smaller: one tick under the ask
+                limit = ask if edge >= c["take_ask"] else max(round(ask - w.tick_size, 4), round(bid + w.tick_size, 4))
                 limit = min(limit, ask)
-                if limit < float(f.get("min_price", 0.55)) - 1e-9:
+                if limit < c["min_p"] - 1e-9:
                     limit = ask                       # one tick under the ask would leave the 55c band
                 if best is None or edge > best[0]:
-                    best = (edge, side, tok, p, ask, limit)
+                    best = (edge, side, tok, p, ask, limit, bk.get("updated"))
             if best is None:
                 continue
-            edge, side, tok, p, ask, limit = best
+            edge, side, tok, p, ask, limit, book_ts = best
             out.append(Signal(module=self.name, market_id=w.slug, token=tok, side=side, fair_prob=p,
                               confidence=1.0, edge=edge, label=dur, group=w.slug, bet_type="updown",
                               expires_at=w.end,
@@ -239,7 +260,8 @@ class CryptoFairModule(StrategyModule):
                                               "settlement model", edge, now),
                                        Reason(f"{w.end - now:.0f}s left, sigma ${fv.sigma:.2f}/s^0.5, "
                                               f"{fv.locked}/60 prices locked", "settlement model", 0, now)],
-                              extra={"limit": limit, "time_left": w.end - now, "strategy": "fair_value"}))
+                              extra={"limit": limit, "time_left": w.end - now, "strategy": "fair_value",
+                                     "ask": ask, "book_ts": book_ts}))
         return out
 
     def entry_blockers(self, signal: Signal, active: list[dict], now: float) -> list[str]:
@@ -352,14 +374,18 @@ class CryptoFairModule(StrategyModule):
             return ExitDecision("SELL", f"true probability {fair:.0%} < {stop_below:.0%}: sell at the bid "
                                         f"({best_bid:.2f}) instead of riding it to zero", "prob_stop")
         entry = p.get("entry_price")
-        gain = float(x.get("profit_take_gain", 0.06))
-        if entry is not None and best_bid >= entry + gain - 1e-9 and fair - net < float(x.get("profit_take_max_edge", 0.03)):
+        gain = x.get("profit_take_gain", 0.06)
+        gain = None if gain in (None, False, "off", "none", "") else float(gain)
+        if gain is not None and entry is not None and best_bid >= entry + gain - 1e-9 and \
+                fair - net < float(x.get("profit_take_max_edge", 0.03)):
             return ExitDecision("SELL", f"profit take: bid {best_bid:.2f} >= entry {entry:.2f} + {gain:.2f} and "
                                         f"edge left {fair - net:+.3f} < {float(x.get('profit_take_max_edge', 0.03)):.2f}",
                                 "profit_take")
         if net > fair:
             return ExitDecision("SELL", f"bid nets {net:.3f} > fair {fair:.3f}: someone is overpaying",
                                 "bid_above_fair")
+        # (the 'sharp flip' rule below can only fire at fair <= flip_floor 15%, which the 30% stop above
+        # already covers; it stays as a backstop if sell_if_fair_below is ever lowered)
         h = self.fair_hist.get(p["slug"]) or []
         f = self.fc
         window = float(f.get("flip_window_s", 10))

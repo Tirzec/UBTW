@@ -179,6 +179,8 @@ def us_book_to_store(store: BookStore, slug: str, data: dict, now: float, last_s
                                            fmt([(round(1 - p, 4), q) for p, q in bids]), now)
     store.book(long_token(slug)).exch_ts = exch
     store.book(short_token(slug)).exch_ts = exch
+    if hasattr(store, "notify"):
+        store.notify()                    # wake the entry check now, not on the next timer tick
     st = md.get("stats") or {}
     shares = st.get("sharesTraded")
     px = _amount(st.get("lastTradePx"))

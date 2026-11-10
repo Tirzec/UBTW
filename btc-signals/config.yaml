@@ -173,16 +173,23 @@ trading:
   entry:
     stake_pct: 0.10                # each fair-value trade = 10% of current buying power (user 2026-11-10)
     stake_usd: off                 # (fixed-dollar stake, used only if stake_pct is off)
-    order_timeout_s: 10            # cancel an unfilled limit entry after 10 s
+    order_timeout_s: 3             # cancel an unfilled limit entry after 3 s; the next book update
+                                   #   re-checks the edge and re-quotes if it is still there (was 10 s)
+    event_driven: true             # check entries on every order-book update (websocket), not on a timer
+    min_signal_gap_s: 0.05         # ... at most every 50 ms
+    entry_latency_alert_ms: 300    # alert if median book update -> buy order exceeds this
     reentry_cooldown_s: 20
     max_entries_per_window: 1      # one fair-value position per window
   exits:
     check_interval_s: 1            # exits: bid (after fees) vs fair; no % stop / take-profit
     fast_check_interval_s: 0.25    # with an open position: check exits every 250 ms
-    profit_lock_price: 0.96        # resting SELL for the whole position, placed when it opens, at
-    profit_lock_offset: 0.10       #   min(entry + 10c, 96c): fills with no reaction delay
-    profit_take_gain: 0.06         # bid >= entry + 6c ...
-    profit_take_max_edge: 0.03     # ... and the model's edge (fair - bid after fees) < 3 points: sell now
+    profit_lock_price: 0.95        # resting SELL for the whole position, placed when it opens, at
+    profit_lock_offset: 0.25       #   max(entry + 25c, fair value + 3c), capped at 95c; moved as fair
+    profit_lock_fair_margin: 0.03  #   value changes (2+ ticks, at most every 3 s). Was min(entry + 10c, 96c).
+    profit_lock_reprice_ticks: 2
+    profit_lock_reprice_s: 3
+    profit_take_gain: off          # (was: bid >= entry + 6c and edge < 3 points -> sell; removed 2026-11-10)
+    profit_take_max_edge: 0.03
     sell_if_fair_below: 0.30       # true probability of the held side < 30%: sell at the bid, don't ride to zero
     lock_in_bid: 0.93              # bid >= 93c: sell now ...
     lock_in_hold_above: 0.99       # ... unless the averaging window has started and fair > 99%
@@ -216,6 +223,7 @@ fair_value:                        # PART 1-4 settings (calibrated 2026-11-09 on
   nu: 4
   basis_halflife_s: 600            # spot -> BRTI basis (EWMA)
   min_edge: 0.05                   # fair - ask - taker fee, 15-minute markets
+  take_ask_edge: 0.08              # edge >= 8 points: buy AT the ask (fills now); smaller: one tick under
   five_min_multiplier: 2.0         # 5-minute markets need 2x the edge
   min_price: 0.55                  # only buy a side priced 55c-93c: no long shots (live losses 2026-11-09;
   max_price: 0.93                  #   the model overestimates cheap sides). Arbitrage is the only exception.

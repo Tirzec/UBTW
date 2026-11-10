@@ -11,6 +11,7 @@ Lifecycle of a position:
 from __future__ import annotations
 
 import asyncio
+import math
 import logging
 import time
 
@@ -52,6 +53,9 @@ def entry_cost_guard(ec: dict, *, plan_price: float, fair: float | None, best_bi
             return (f"edge {fair - plan_price:+.3f} doesn't cover selling back at the bid "
                     f"({exit_cost:.3f}/share)")
     return ""
+
+
+RULES_VERSION = "v2-2026-11-10"      # fast entries (book-driven, take ask at 8+ pts, 3 s re-quote) + hold winners
 
 
 class AutoTrader:
@@ -97,6 +101,12 @@ class AutoTrader:
         self._cancel_sent: dict[str, float] = {}        # order id -> when we last asked the exchange to cancel
         self._tick_last: dict[int, tuple] = {}          # position id -> (ts, bid, decision) last trace row
         self._latency: list = []                        # recent exit latencies (ms)
+        self._entry_latency: list = []                  # recent book update -> entry order sent (ms)
+        self._entry_latency_alerted = 0.0
+        self._sig_last: dict = {}                       # signal log throttle
+        self._book_event_obj: asyncio.Event | None = None    # created inside the running loop (Python 3.9)
+        self._lock_obj: asyncio.Lock | None = None      # entry pass and position management never interleave
+        self._entry_task: asyncio.Task | None = None
         self._latency_alerted = 0.0
         self._last_balance_check = -1e18
         self._last_hb = 0.0
@@ -210,12 +220,61 @@ class AutoTrader:
         self.store.event("start", f"auto-trader started in {self.mode.upper()} mode", "WARNING",
                          risk=self.risk.summary())
         self._task = asyncio.create_task(self._loop(), name="autotrader")
+        bs = self._book_store()
+        if self._event_driven() and bs is not None:
+            bs.listeners.append(self._book_event.set)
+            self._entry_task = asyncio.create_task(self._entry_loop(), name="autotrader-entries")
 
     async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+        for t in (self._task, self._entry_task):
+            if t:
+                t.cancel()
+                await asyncio.gather(t, return_exceptions=True)
+        bs = self._book_store()
+        if bs is not None and self._book_event.set in bs.listeners:
+            bs.listeners.remove(self._book_event.set)
         await self.broker.close()
+
+    @property
+    def _book_event(self) -> asyncio.Event:
+        if self._book_event_obj is None:
+            self._book_event_obj = asyncio.Event()
+        return self._book_event_obj
+
+    @property
+    def _lock(self) -> asyncio.Lock:
+        if self._lock_obj is None:
+            self._lock_obj = asyncio.Lock()
+        return self._lock_obj
+
+    def _book_store(self):
+        clob = getattr(self.engine, "clob", None)
+        st = getattr(clob, "store", None)
+        return st if hasattr(st, "listeners") else None
+
+    def _event_driven(self) -> bool:
+        return self.module.name == "crypto_updown" and self.ec.get("event_driven", True) not in (False, "off")
+
+    async def _entry_loop(self) -> None:
+        """Entries react to every order-book update (websocket or poll), not to a timer. Debounced: at most
+        one entry check per min_signal_gap_s; at least one per second without updates."""
+        gap = float(self.ec.get("min_signal_gap_s", 0.05))
+        while True:
+            try:
+                await asyncio.wait_for(self._book_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            self._book_event.clear()
+            try:
+                if not self.store.get_state("kill_requested"):     # STOP wins even between timer ticks
+                    async with self._lock:
+                        await self._entry_pass(time.time())
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.exception("entry check failed")
+                self._api_error("entry check", e)
+            await asyncio.sleep(gap)
 
     async def _loop(self) -> None:
         interval = float(self.xc.get("check_interval_s", 1))
@@ -246,14 +305,20 @@ class AutoTrader:
             self._last_resume_seen = rr
             self.resume()
         await self._housekeeping(now)
-        if self.risk.exits_allowed():
-            for p in self.store.active_positions():
-                try:
-                    await self._manage(p, now)
-                except Maintenance as m:
-                    self.risk.state.maintenance_until = now + m.retry_after
-                except BrokerError as e:
-                    self._api_error(f"position {p['id']}", e)
+        async with self._lock:
+            if self.risk.exits_allowed():
+                for p in self.store.active_positions():
+                    try:
+                        await self._manage(p, now)
+                    except Maintenance as m:
+                        self.risk.state.maintenance_until = now + m.retry_after
+                    except BrokerError as e:
+                        self._api_error(f"position {p['id']}", e)
+            if self._entry_task is None or self._entry_task.done():
+                await self._entry_pass(now)        # timer-driven fallback (no book feed / other modules)
+        self._save()
+
+    async def _entry_pass(self, now: float) -> None:
         sigs = self.module.signals(now)
         if not sigs:
             self.status_note = ""
@@ -265,7 +330,6 @@ class AutoTrader:
                 self.store.event("maintenance", str(m), "WARNING")
             except BrokerError as e:
                 self._api_error(f"entry {sig.label}", e)
-        self._save()
 
     async def _housekeeping(self, now: float) -> None:
         if self.mode == "live" and now - self._last_hb >= 5:
@@ -320,13 +384,34 @@ class AutoTrader:
             return True
         return now - self.last_close.get(slug, 0) < float(self.ec.get("reentry_cooldown_s", 20))
 
+    def _log_signal(self, sig, decision: str, reason: str = "", position_id=None) -> None:
+        """Signal log (bot_signals), throttled: a row when the decision/reason changes, else every 10 s."""
+        if (sig.extra or {}).get("strategy") != "fair_value":
+            return
+        key = (sig.market_id, sig.side)
+        last = self._sig_last.get(key)
+        now = time.time()
+        if decision != "entered" and last and last[1] == (decision, reason[:40]) and now - last[0] < 10:
+            return
+        self._sig_last[key] = (now, (decision, reason[:40]))
+        try:
+            self.store.signal(slug=sig.market_id, side=sig.side, edge=round(sig.edge, 4),
+                              ask=(sig.extra or {}).get("ask"), fair=round(sig.fair_prob, 4), decision=decision,
+                              reason=reason[:200], rules=RULES_VERSION, position_id=position_id)
+        except Exception:  # noqa: BLE001 - logging must never block trading
+            log.exception("signal log failed")
+
+    def _skip(self, sig, reason: str) -> None:
+        self.status_note = f"{sig.label} {sig.side} signal skipped: {reason}"
+        self._log_signal(sig, "skipped", reason)
+
     async def _maybe_enter(self, sig, now: float) -> None:
         m = self.module.market(sig.market_id)
         if m is None or (m.entry_deadline is not None and now >= m.entry_deadline):
             return
         stake = self.stake_now(sig)
         if stake is None:
-            self.status_note = f"{sig.label} {sig.side} signal skipped: balance not known yet (stake is a % of it)"
+            self._skip(sig, "balance not known yet (stake is a % of it)")
             return
         if self.risk.max_exposure_pct is not None and self.last_balance is not None:
             self.risk.max_exposure = self.risk.max_exposure_pct * self.last_balance
@@ -347,7 +432,7 @@ class AutoTrader:
                         self._alert("Daily limit reached - no more entries today", b, "warn", "risk")
             blockers += gb
         if blockers:
-            self.status_note = f"{sig.label} {sig.side} signal skipped: {blockers[0]}"
+            self._skip(sig, blockers[0])
             return
         side, token = sig.side, sig.token
         book = self.module.book(token) or {"bids": [], "asks": []}
@@ -366,14 +451,14 @@ class AutoTrader:
                               tick=m.tick_size, min_size=m.min_size, size_step=m.size_step,
                               style=self.ec.get("order_style", "maker"), fee_schedule=m.fee_schedule)
         if not plan.ok:
-            self.status_note = f"{sig.label} {side} signal skipped: {plan.reason}"
+            self._skip(sig, plan.reason)
             return
         why = entry_cost_guard(self.ec, plan_price=plan.price, fair=sig.fair_prob,
                                best_bid=book["bids"][0][0] if book["bids"] else None,
                                best_ask=book["asks"][0][0] if book["asks"] else None,
                                fee_schedule=m.fee_schedule)
         if why:
-            self.status_note = f"{sig.label} {side} signal skipped: {why}"
+            self._skip(sig, why)
             return
         pid = self.store.new_position(slug=sig.market_id, duration=sig.label, side=side, token=token,
                                       condition_id=m.condition_id, status="opening",
@@ -383,12 +468,18 @@ class AutoTrader:
                                       starts_at=sig.starts_at,
                                       strategy=(sig.extra or {}).get("strategy"),
                                       time_left_s=(sig.extra or {}).get("time_left"),
+                                      rules=RULES_VERSION if (sig.extra or {}).get("strategy") else None,
+                                      signal_ask=(sig.extra or {}).get("ask"),
+                                      signal_book_ts=(sig.extra or {}).get("book_ts"),
                                       reasons=json.dumps([r.as_dict() for r in sig.reasons][:5]))
+        t_send = time.time()
         o = await self.broker.place_limit(token=token, side="BUY", price=plan.price, size=plan.shares,
                                           post_only=plan.post_only,
                                           ioc=False if limit is not None else None)
         self.store.order(o, pid, "entry")
-        self.store.update_position(pid, entry_order=o.order_id)
+        self.store.update_position(pid, entry_order=o.order_id, order_sent_ts=t_send)
+        self._log_signal(sig, "entered", f"BUY @ {plan.price:.2f} (ask {(sig.extra or {}).get('ask')})", pid)
+        self._record_entry_latency(pid, sig, now, t_send)
         self.store.event("order", f"BUY {side} {plan.shares:.2f} @ {plan.price:.2f} "
                          f"({'post-only' if plan.post_only else 'limit'}) {sig.market_id}", position=pid,
                          order=o.order_id, status=o.status, edge=round(sig.edge, 4),
@@ -443,6 +534,25 @@ class AutoTrader:
         self._alert(f"Bought {p['duration']} {p['side']} @ {o.avg_price:.2f}",
                     f"{o.filled:.1f} shares, ${o.notional:.2f}. TP bid ≥{tp:.2f}, SL bid ≤{sl:.2f}.")
 
+    def _record_entry_latency(self, pid: int, sig, t_signal: float, t_send: float) -> None:
+        """Book update received -> entry order sent. Alert if the median is regularly over the limit."""
+        book_ts = (sig.extra or {}).get("book_ts")
+        if not book_ts:
+            return
+        ms = (t_send - book_ts) * 1000
+        self.store.event("entry_latency", f"book update -> order {ms:.0f} ms (signal -> order "
+                         f"{(t_send - t_signal) * 1000:.0f} ms)", position=pid, book_to_order_ms=round(ms))
+        self._entry_latency = (self._entry_latency + [ms])[-20:]
+        limit = float(self.ec.get("entry_latency_alert_ms", 300))
+        if len(self._entry_latency) >= 5:
+            med = sorted(self._entry_latency)[len(self._entry_latency) // 2]
+            if med > limit and time.time() - self._entry_latency_alerted > 3600:
+                self._entry_latency_alerted = time.time()
+                self.store.event("warning", f"slow entries: median book->order {med:.0f} ms > {limit:.0f} ms",
+                                 "WARNING")
+                self._alert("Slow entries", f"median book update -> buy order {med:.0f} ms over the last "
+                            f"{len(self._entry_latency)} entries (limit {limit:.0f} ms)", "warn", "error")
+
     # ------------------------------------------------------------ exits
     async def _manage(self, p: dict, now: float) -> None:
         m = self.module.market(p["slug"])
@@ -473,6 +583,9 @@ class AutoTrader:
             return
         p = self.store.position(p["id"])
         if p["status"] == "open":
+            p = await self._lock_reprice(p, m, now)
+            if p is None or p["status"] != "open":
+                return                             # old lock not confirmed canceled yet: next tick
             await self._lock_place(p, m, now)
 
     # ------------------------------------------------------------ resting profit-lock SELL
@@ -534,7 +647,8 @@ class AutoTrader:
         return await self.broker.poll(oid)
 
     def _lock_price(self, p: dict, m) -> float | None:
-        """Resting profit-lock price: min(entry + profit_lock_offset, profit_lock_price), on the tick grid."""
+        """Resting profit-lock price: max(entry + profit_lock_offset, fair value + profit_lock_fair_margin),
+        capped at profit_lock_price, on the tick grid (rounded up). Fair value unknown -> entry + offset."""
         cap = self.xc.get("profit_lock_price")
         if not cap:
             return None
@@ -544,8 +658,37 @@ class AutoTrader:
         if off is None or entry is None:
             return cap
         tick = m.tick_size if m else 0.01
-        price = round(round((float(entry) + float(off)) / tick) * tick, 6)
+        target = float(entry) + float(off)
+        margin = self.xc.get("profit_lock_fair_margin")
+        if margin not in (None, False, "off") and hasattr(self.module, "fair"):
+            fair, _ = self.module.fair(p)
+            if fair is not None:
+                target = max(target, float(fair) + float(margin))
+        price = round(math.ceil(target / tick - 1e-6) * tick, 6)
         return min(price, cap)
+
+    async def _lock_reprice(self, p: dict, m, now: float):
+        """Fair value moved: move the resting lock to the new target (>= reprice_ticks away, at most every
+        reprice_s). Uses the safe cancel; returns fresh p, or None if the cancel is not confirmed yet."""
+        oid = p.get("lock_order")
+        if not oid or m is None:
+            return p
+        o = self.broker.orders.get(oid)
+        if o is None or o.done or o.purpose not in ("lock", "", None):
+            return p
+        if m.hold_phase_from is not None and now >= m.hold_phase_from - 1:
+            return p
+        target = self._lock_price(p, m)
+        if not target:
+            return p
+        tick = m.tick_size or 0.01
+        if abs(target - o.price) < int(self.xc.get("profit_lock_reprice_ticks", 2)) * tick - 1e-9:
+            return p
+        if now - (o.created or 0) < float(self.xc.get("profit_lock_reprice_s", 3)):
+            return p
+        self.store.event("order", f"moving profit lock {o.price:.2f} -> {target:.2f} (fair value moved)",
+                         position=p["id"], order=oid)
+        return await self._cancel_lock(p)
 
     async def _lock_poll(self, p: dict):
         """Refresh the current lock order (if any), book its fills, forget it once it is finished."""
@@ -773,6 +916,29 @@ class AutoTrader:
         self._self_check(p)
         self._alert(f"Closed {p['duration']} {p['side']}: {pnl:+.2f}",
                     f"{kw.get('exit_reason') or p.get('exit_reason') or ''}. Today {self.risk.state.day_pnl:+.2f}.")
+        self._rules_report(p)
+
+    def _rules_report(self, p: dict) -> None:
+        """After rules_report_after (50) trades on the current rules: compare against the old rules once."""
+        if p.get("rules") != RULES_VERSION:
+            return
+        n_after = int(self.tc.get("rules_report_after", 50))
+        key = f"rules_report:{self.mode}:{RULES_VERSION}"
+        if self.store.get_state(key):
+            return
+        n = self.store.db.query("SELECT COUNT(*) n FROM bot_positions WHERE mode=? AND rules=? AND status='closed'",
+                                (self.mode, RULES_VERSION))[0]["n"]
+        if n < n_after:
+            return
+        try:
+            from ..execution_report import analyse, compare_text
+            text = compare_text(analyse(self.store.db, mode=self.mode, days=365))
+        except Exception as e:  # noqa: BLE001
+            log.exception("rules comparison failed")
+            text = f"comparison failed: {e}"
+        self.store.set_state(key, time.time())
+        self.store.event("rules_report", text, "WARNING")
+        self._alert(f"{n} trades on the new rules: old vs new", text, "info", "summary")
 
     @staticmethod
     def _strategy_stats(closed: list[dict]) -> dict:

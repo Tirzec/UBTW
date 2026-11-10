@@ -10,6 +10,7 @@
   python -m app.trader summary [--date YYYY-MM-DD] [--live] [--send]   # daily summary (paper by default)
   python -m app.trader exits [--live] [--days 3]   # positions that reached a 90c+ bid: timing of the sell
   python -m app.trader entries [--live] [--days 7] # cheap (<30c) entries: why they passed; <30c vs >50c results
+  python -m app.trader execution [--live] [--days 7]  # entry speed/fills, profit left on the table, old vs new rules
 """
 from __future__ import annotations
 
@@ -117,7 +118,7 @@ async def _account_report(cfg: dict, what: str, c) -> str:
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.trader")
     ap.add_argument("command", choices=["stop", "resume", "status", "stats", "fills", "reconcile", "summary",
-                                        "exits", "entries"])
+                                        "exits", "entries", "execution"])
     ap.add_argument("--below", type=float, default=0.30, help="entries: 'cheap' threshold")
     ap.add_argument("--above", type=float, default=0.50, help="entries: 'expensive' threshold")
     ap.add_argument("--days", type=float, default=3, help="exits: how far back")
@@ -161,6 +162,14 @@ def main(argv=None) -> None:
         from .exit_report import analyse, format_report
         db = DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db")))
         print(format_report(analyse(db, mode="live" if a.live else "paper", days=a.days)))
+    elif a.command == "execution":
+        import httpx
+        from .db import DB
+        from .execution_report import analyse as ex_analyse, format_report as ex_format
+        db = DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db")))
+        with httpx.Client(timeout=15) as hc:
+            print(ex_format(ex_analyse(db, mode="live" if a.live else "paper",
+                                       days=a.days if a.days != 3 else 7, client=hc)))
     elif a.command == "summary":
         from .db import DB
         from .trading.summary import build_summary, format_summary

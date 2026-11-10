@@ -46,6 +46,14 @@ class BookStore:
 
     def __init__(self) -> None:
         self.books: dict[str, OrderBook] = {}
+        self.listeners: list = []          # called (no args) after every book update: event-driven entries
+
+    def notify(self) -> None:
+        for fn in list(self.listeners):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - a listener must never break the feed
+                pass
 
     def book(self, asset_id: str) -> OrderBook:
         b = self.books.get(asset_id)
@@ -71,6 +79,7 @@ class BookStore:
             b.last_trade = float(msg["price"])
             b.trades.append((now, float(msg["price"]), float(msg.get("size") or 0)))
             b.updated = now
+        self.notify()
 
     def trades_since(self, asset_id: str, since: float) -> list[tuple[float, float, float]]:
         b = self.books.get(asset_id)

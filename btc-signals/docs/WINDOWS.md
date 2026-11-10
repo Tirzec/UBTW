@@ -101,6 +101,7 @@ the next start, the bot stays halted until you clear it:
 ```powershell
 .\windows\resume.bat        # or press Resume on the dashboard
 .\windows\status.bat        # mode, risk state, open positions
+.\windows\execution.bat     # entry speed, unfilled entries, profit left on the table, old vs new rules
 ```
 For an emergency stop while it keeps running (dashboard stays up): the **STOP** button on the
 dashboard, or `.\.venv\Scripts\python.exe -m app.trader stop`.
