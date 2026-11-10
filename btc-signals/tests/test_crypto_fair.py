@@ -232,3 +232,44 @@ def test_profit_take_and_probability_stop():
     m, w = _module(now, 0.10, {"bids": [], "asks": [(0.12, 5)]}, book(0.88, 0.90))
     m.xc_exits = {"sell_if_fair_below": 0.30}
     assert m.exit_decision(pos | {"slug": w.slug}, Valuation(0, 0, 0, 0, 0, 0, 0, False), now).action == "HOLD"
+
+
+def test_limit_price_never_leaves_the_band():
+    L = 900
+    now = (int(time.time()) // L) * L + 400
+    m, _ = _module(now, 0.66, book(0.53, 0.55), book(0.45, 0.47))     # ask 55c, moderate edge
+    (s,) = m.signals(now)
+    assert s.extra["limit"] == 0.55                                  # not 54c (one tick under the ask)
+
+
+def test_lock_in_only_takes_profits():
+    L = 900
+    now = (int(time.time()) // L) * L + 500
+    m, w = _module(now, 0.95, book(0.93, 0.94), book(0.06, 0.07))
+    m.xc_exits = {"lock_in_bid": 0.93}
+    pos = {"slug": w.slug, "side": "UP", "p_model": 0.95, "token": w.token_up, "entry_price": 0.93}
+    d = m.exit_decision(pos, Valuation(1, 0.93, 0.01, 0.92, 0.92, -0.02, -0.02, True), now)
+    assert d.trigger != "lock_in"                                    # bought at 93c: don't dump it at a loss
+    d = m.exit_decision(pos | {"entry_price": 0.80}, Valuation(1, 0.93, 0.01, 0.92, 0.92, 0.11, 0.13, True), now)
+    assert d.trigger == "lock_in"
+
+
+def test_market_info_from_slug_when_window_not_tracked():
+    from app.ingest.us_markets import us_slug
+    slug = us_slug("15m", 1794272400)
+    eng = SimpleNamespace(durations=["15m"], discovery=SimpleNamespace(windows={}), alert=lambda *a, **k: None)
+    m = CryptoFairModule(eng, {"trading": {}, "fair_value": {}})
+    mi = m.market(slug)
+    assert mi is not None and mi.hold_phase_from == 1794272400 + 900 and mi.label == "15m"
+    assert m.market("not-a-slug") is None
+
+
+def test_one_entry_per_settlement_time_even_after_selling():
+    from app.ingest.us_markets import us_slug
+    s15 = 1794272400
+    closed = {"id": 9, "slug": us_slug("15m", s15), "side": "DOWN", "status": "closed"}
+    m, _ = _module(time.time(), 0.8, book(0.6, 0.61), book(0.38, 0.39))
+    m._recent_positions = lambda now: [closed]
+    blk = m.entry_blockers(SimpleNamespace(market_id=us_slug("5m", s15 + 600)), [], time.time())
+    assert any("already traded #9" in b for b in blk)
+    assert m.entry_blockers(SimpleNamespace(market_id=us_slug("5m", s15 + 900)), [], time.time()) == []

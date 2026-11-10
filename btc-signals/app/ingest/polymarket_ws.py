@@ -17,7 +17,8 @@ class OrderBook:
     def __init__(self) -> None:
         self.bids: dict[float, float] = {}
         self.asks: dict[float, float] = {}
-        self.updated = 0.0
+        self.updated = 0.0          # when we received this book (freshness)
+        self.exch_ts = 0.0          # exchange transactTime of the snapshot (ordering), if known
         self.last_trade: float | None = None
         self.trades: deque[tuple[float, float, float]] = deque(maxlen=500)  # (ts, price, size)
 
@@ -37,7 +38,7 @@ class OrderBook:
     def sorted(self) -> dict:
         return {"bids": sorted(self.bids.items(), key=lambda kv: -kv[0]),
                 "asks": sorted(self.asks.items(), key=lambda kv: kv[0]),
-                "updated": self.updated, "last_trade": self.last_trade}
+                "updated": self.updated, "exch_ts": self.exch_ts, "last_trade": self.last_trade}
 
 
 class BookStore:

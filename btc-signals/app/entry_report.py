@@ -95,9 +95,9 @@ def analyse(db, *, mode: str, days: float = 7, below: float = 0.30, above: float
         need = thr * (mult if dur == "5m" else 1.0)
         checks = []
         if r.get("strategy") == "fair_value":
-            checks.append(f"price {r['entry_price']:.2f} inside the band then in force (5c-95c)")
+            checks.append(f"price {r['entry_price']:.2f} inside the band in force before 2026-11-10 (5c-95c)")
             if r.get("edge") is not None:
-                checks.append(f"edge {r['edge']:+.3f} >= needed {need:.2f} ({dur})" if r["edge"] >= need - 1e-9
+                checks.append(f"edge {r['edge']:+.3f} >= needed {need:.2f} ({dur}, current setting)" if r["edge"] >= need - 1e-9
                               else f"edge {r['edge']:+.3f} BELOW needed {need:.2f} (should not have passed)")
             if L and r.get("time_left_s") is not None:
                 elapsed = L - r["time_left_s"]
@@ -113,10 +113,14 @@ def analyse(db, *, mode: str, days: float = 7, below: float = 0.30, above: float
     hi = [r for r in rows if r["entry_price"] is not None and r["entry_price"] > above]
     from .exit_report import _window
     by_settle: dict = {}
-    for r in rows:
-        _, _, end = _window(r["slug"])
-        if end:
-            by_settle.setdefault(end, []).append(r)
+    spans = [(r, *_window(r["slug"])[1:]) for r in rows]
+    for r, st, end in spans:                         # group every set of overlapping 5m/15m windows
+        if not st:
+            continue
+        key = next((k for k, grp in by_settle.items()
+                    if any(st < e2 and s2 < end for _, s2, e2 in grp)), None)
+        by_settle.setdefault(key if key is not None else end, []).append((r, st, end))
+    by_settle = {k: [x[0] for x in v] for k, v in by_settle.items()}
     doubled = {k: v for k, v in by_settle.items() if len(v) > 1}
     return {"rows": len(rows), "cheap": cheap, "below": _group(lo), "middle": _group(mid), "above": _group(hi),
             "thresholds": (below, above), "doubled": doubled}
@@ -155,7 +159,7 @@ def format_report(a: dict) -> str:
              " the model gave those sides at entry. A big gap means the model overestimated them.)")
     if a["doubled"]:
         L.append("")
-        L.append("Positions settling at the same time (doubled-up bets):")
+        L.append("Positions in overlapping windows (doubled-up or opposite bets on the same move):")
         for end, rs in sorted(a["doubled"].items()):
             L.append(f"   {time.strftime('%Y-%m-%d %H:%M', time.localtime(end))}: " + "; ".join(
                 f"#{r['id']} {r['slug'].split('-')[3]} {r['side']} @ {r['entry_price']:.2f} -> {_f(r['pnl'])}" for r in rs))

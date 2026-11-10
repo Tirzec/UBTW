@@ -58,7 +58,16 @@ class CryptoUpDownModule(StrategyModule):
     def market(self, slug: str) -> Optional[MarketInfo]:
         w = self.engine.discovery.windows.get(slug)
         if w is None:
-            return None
+            # not tracked any more (e.g. the window ended while the bot was offline): build it from the slug
+            # so the position still reaches resolution and settles
+            from ..exit_report import _window
+            dur, start, end = _window(slug)
+            if dur is None:
+                return None
+            return MarketInfo(slug=slug, tick_size=0.01, min_size=0.01, size_step=0.01,
+                              fee_schedule={"rate": 0.095, "exponent": 1, "takerOnly": True, "round_cents": True},
+                              condition_id="", label=dur, entry_deadline=end - 5, hold_phase_from=end,
+                              seconds_left=end - time.time())
         return MarketInfo(slug=slug, tick_size=w.tick_size, min_size=w.min_size, size_step=getattr(w, "size_step", 0.01),
                           fee_schedule=w.fee_schedule, condition_id=w.condition_id, label=w.duration,
                           entry_deadline=w.end - 5, hold_phase_from=w.end)

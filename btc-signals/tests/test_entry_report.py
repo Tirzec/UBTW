@@ -38,7 +38,7 @@ def test_report_cheap_vs_expensive_and_backfill(tmp_path):
     assert a["below"]["pnl"] == -1.96 and a["above"]["win_rate"] == 1.0
     assert [r["side_won"] for r in d.query("SELECT side_won FROM bot_positions ORDER BY id")] == [0, 0, 1]
     c = a["cheap"][0]
-    assert any("edge +0.120 >= needed 0.10 (5m)" in ch for ch in c["checks"])
+    assert any("edge +0.120 >= needed 0.10 (5m" in ch for ch in c["checks"])
     assert any("180s into the window" in ch for ch in c["checks"])
     txt = format_report(a)
     assert "true probability at entry 31.0%" in txt and "doubled-up" in txt          # 5m + 15m settle together

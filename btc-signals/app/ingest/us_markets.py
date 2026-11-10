@@ -162,10 +162,12 @@ def book_time(data: dict, now: float) -> float:
 def us_book_to_store(store: BookStore, slug: str, data: dict, now: float, last_shares: dict) -> None:
     """Write a /book response into the long (Up) and derived short (Down) books (pure)."""
     md = data.get("marketData") or data
-    now = book_time(data, now)
+    exch = book_time(data, now)           # exchange time of the snapshot (= now if it has none)
     cur = store.book(long_token(slug))
-    if getattr(cur, "updated", 0) and now < cur.updated - 1e-6:
+    if getattr(cur, "exch_ts", 0) and exch < cur.exch_ts - 1e-6:
         return                            # older than what we already have (websocket vs poll race)
+    # freshness is when WE received it (requests bypass the cache); transactTime is the time of the
+    # book's last change, so a quiet but current book must not look stale
     bids = [(_amount(x.get("px")), float(x.get("qty") or 0)) for x in md.get("bids") or []]
     offers = [(_amount(x.get("px")), float(x.get("qty") or 0)) for x in md.get("offers") or []]
     bids = [(p, q) for p, q in bids if p is not None and q > 0]
@@ -175,6 +177,8 @@ def us_book_to_store(store: BookStore, slug: str, data: dict, now: float, last_s
     # Down side: buying Down at x == selling Up at 1-x
     store.book(short_token(slug)).snapshot(fmt([(round(1 - p, 4), q) for p, q in offers]),
                                            fmt([(round(1 - p, 4), q) for p, q in bids]), now)
+    store.book(long_token(slug)).exch_ts = exch
+    store.book(short_token(slug)).exch_ts = exch
     st = md.get("stats") or {}
     shares = st.get("sharesTraded")
     px = _amount(st.get("lastTradePx"))
@@ -324,7 +328,10 @@ class UsBookStream:
                 backoff = 1.0
                 await self._subscribe(self.wanted)
                 async for raw in self.ws:
-                    self.handle(raw)
+                    try:
+                        self.handle(raw)
+                    except (ValueError, KeyError, TypeError) as e:
+                        self.last_error = f"bad frame: {type(e).__name__}: {e}"[:200]
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -332,6 +339,12 @@ class UsBookStream:
                 log.warning("book websocket: %s (reconnecting in %.0fs)", self.last_error, backoff)
             self.connected = False
             self.reconnects += 1
+            if self.ws is not None:
+                try:
+                    await self.ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.ws = None
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
 

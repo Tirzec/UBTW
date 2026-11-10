@@ -123,8 +123,8 @@ class CryptoFairModule(StrategyModule):
             bps = (hi - lo) / lo * 1e4
             if bps > float(f.get("max_spot_disagree_bps", 15)):
                 out.append(f"spot feeds disagree by {bps:.0f} bps")
-        if now - self.started < float(f.get("warmup_s", 600)):
-            out.append(f"warming up ({self.started + float(f.get('warmup_s', 600)) - now:.0f}s left)")
+        if now - self.started < float(f.get("warmup_s", 1800)):
+            out.append(f"warming up ({self.started + float(f.get('warmup_s', 1800)) - now:.0f}s left)")
         if self.est.basis is None:
             out.append("basis not known yet")
         sig = [s for _, s in self.sigma_hist]
@@ -221,6 +221,8 @@ class CryptoFairModule(StrategyModule):
                     continue
                 limit = ask if edge >= 2 * need else max(round(ask - w.tick_size, 4), round(bid + w.tick_size, 4))
                 limit = min(limit, ask)
+                if limit < float(f.get("min_price", 0.55)) - 1e-9:
+                    limit = ask                       # one tick under the ask would leave the 55c band
                 if best is None or edge > best[0]:
                     best = (edge, side, tok, p, ask, limit)
             if best is None:
@@ -238,11 +240,27 @@ class CryptoFairModule(StrategyModule):
 
     def entry_blockers(self, signal: Signal, active: list[dict], now: float) -> list[str]:
         out = list(self.problems)
-        clash = self.overlapping_position(signal.market_id, active)
+        seen = {p["id"] for p in active}
+        recent = [p for p in self._recent_positions(now) if p["id"] not in seen]
+        clash = self.overlapping_position(signal.market_id, list(active) + recent)
         if clash is not None:
-            out.append(f"already holding #{clash['id']} {clash['slug'].split('-')[3]} {clash['side']} in an "
-                       "overlapping window: one fair-value position per settlement time")
+            verb = "already traded" if clash.get("status") == "closed" else "already holding"
+            out.append(f"{verb} #{clash['id']} {clash['slug'].split('-')[3]} {clash['side']} in an overlapping "
+                       "window: one fair-value position per settlement time")
         return out
+
+    def _recent_positions(self, now: float) -> list[dict]:
+        """Filled positions (any status but void) opened in the last hour, for the one-per-settlement rule."""
+        store = getattr(self.engine, "trade_store", None)
+        if store is None:
+            return []
+        try:
+            return store.db.query(
+                "SELECT * FROM bot_positions WHERE mode=? AND COALESCE(venue,'polymarket_intl')=? "
+                "AND COALESCE(module,'crypto_updown')='crypto_updown' AND status!='void' AND opened_ts>=?",
+                (store.mode, store.venue, now - 3600))
+        except Exception:  # noqa: BLE001 - never block trading on a reporting query
+            return []
 
     @staticmethod
     def overlapping_position(slug: str, active: list[dict]) -> Optional[dict]:
@@ -267,7 +285,16 @@ class CryptoFairModule(StrategyModule):
     def market(self, slug: str) -> Optional[MarketInfo]:
         w = self.engine.discovery.windows.get(slug)
         if w is None:
-            return None
+            # not tracked any more (e.g. the window ended while the bot was offline): build it from the slug
+            # so the position still reaches resolution and settles
+            from ..exit_report import _window
+            dur, start, end = _window(slug)
+            if dur is None:
+                return None
+            return MarketInfo(slug=slug, tick_size=0.01, min_size=0.01, size_step=0.01,
+                              fee_schedule={"rate": 0.095, "exponent": 1, "takerOnly": True, "round_cents": True},
+                              condition_id="", label=dur, entry_deadline=end - 5, hold_phase_from=end,
+                              seconds_left=end - time.time())
         return MarketInfo(slug=slug, tick_size=w.tick_size, min_size=w.min_size,
                           size_step=getattr(w, "size_step", 0.01), fee_schedule=w.fee_schedule,
                           condition_id=w.condition_id, label=w.duration,
@@ -297,7 +324,7 @@ class CryptoFairModule(StrategyModule):
         best_bid = bk["bids"][0][0] if bk.get("bids") else 0.0
         fv = self.fair_now.get(p["slug"])
         lock_in = float(x.get("lock_in_bid", 0.93))
-        if best_bid >= lock_in:
+        if best_bid >= lock_in and val.pnl > 0:
             certain = fv is not None and fv.locked > 0 and fair > float(x.get("lock_in_hold_above", 0.99))
             if not certain:
                 return ExitDecision("SELL", f"lock-in: bid {best_bid:.2f} >= {lock_in:.2f}, take the profit "
@@ -379,4 +406,4 @@ class CryptoFairModule(StrategyModule):
                                 "seconds_left": round(fv.seconds_left)} for slug, fv in self.fair_now.items()},
                 "notes": self.notes, "arbitrage": self.arb, "uptime_s": round(now - self.started),
                 "ready": self.ready,
-                "warmup_left_s": max(0.0, round(self.started + float(self.fc.get("warmup_s", 600)) - now))}
+                "warmup_left_s": max(0.0, round(self.started + float(self.fc.get("warmup_s", 1800)) - now))}

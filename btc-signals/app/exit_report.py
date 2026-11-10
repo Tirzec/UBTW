@@ -47,7 +47,8 @@ def history_bids(client, slug: str, side: str, start: int, end: int) -> list[tup
         lp, sp = h.get("longPrice"), h.get("shortPrice")
         if lp is None or sp is None:
             continue
-        out.append((float(h["timestamp"]), round(1 - float(sp) if side == "UP" else 1 - float(lp), 4)))
+        # a point stamped t is the order book at ~t+60 s (end of that minute)
+        out.append((float(h["timestamp"]) + 60, round(1 - float(sp) if side == "UP" else 1 - float(lp), 4)))
     return out
 
 

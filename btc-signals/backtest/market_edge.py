@@ -5,7 +5,8 @@
 At each market snapshot after the first third of a window: model fair P(UP) (only data up to that
 second) vs the market mid; plus the PART 2 entry rule (fair - ask - taker fee >= threshold; 5m needs
 2x; ask within [0.05, 0.95]; first signal per window; buy at the ask; hold to resolution).
-Display prices are ~1-minute book snapshots, so this is an approximation of what was executable.
+Display prices are ~1-minute book snapshots, so this is an approximation of what was executable. A point
+stamped t describes the book at ~t+60 s, so snapshots are shifted by --offset (default 60 s).
 """
 from __future__ import annotations
 
@@ -25,6 +26,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--min-edge", type=float, default=0.05)
+    ap.add_argument("--min-price", type=float, default=0.05)
+    ap.add_argument("--max-price", type=float, default=0.95)
+    ap.add_argument("--offset", type=int, default=60,
+                    help="seconds to add to price-history timestamps: a point stamped t is the book at ~t+60 s "
+                         "(verified 2026-11-10; using t as-is gives the market a 60 s look-ahead)")
     a = ap.parse_args(argv)
     d = Path(a.data)
     X, S = load(d)
@@ -33,7 +39,7 @@ def main(argv=None):
     snaps = {}
     for slug, m in hist.items():
         for h in m["h"]:
-            t = int(h["timestamp"])
+            t = int(h["timestamp"]) + a.offset
             if t < m["start"] + (m["end"] - m["start"]) / 3 or t >= m["end"] - 5:
                 continue
             if h.get("longPrice") is None or h.get("shortPrice") is None:
@@ -67,7 +73,7 @@ def main(argv=None):
                 continue
             need = a.min_edge * (2 if m["dur"] == "5m" else 1)
             for side, ask, p in (("UP", ask_up, fv.p_up), ("DOWN", ask_dn, 1 - fv.p_up)):
-                if not 0.05 <= ask <= 0.95:
+                if not a.min_price <= ask <= a.max_price:
                     continue
                 edge = p - ask - fee_per_share(ask, SCHED)
                 if edge >= need:

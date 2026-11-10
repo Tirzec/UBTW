@@ -93,7 +93,7 @@ class AutoTrader:
         self.status_note = ""
         self.last_balance: float | None = None
         self._limit_alerted: set = set()
-        self._lock_seen: dict[str, tuple] = {}          # lock order id -> (filled, notional, fee) accounted
+        self._lock_rejected: dict[int, float] = {}      # position id -> time a post-only lock was rejected
         self._tick_last: dict[int, tuple] = {}          # position id -> (ts, bid, decision) last trace row
         self._latency: list = []                        # recent exit latencies (ms)
         self._latency_alerted = 0.0
@@ -138,10 +138,20 @@ class AutoTrader:
         except Exception as e:  # noqa: BLE001
             self.store.event("error", f"cancel_all failed during kill: {e}", "ERROR")
         for p in self.store.active_positions():
-            if p["status"] == "opening":
-                await self._finish_entry(p)
-            elif p["status"] == "closing":
-                self.store.update_position(p["id"], status="open", exit_order=None)
+            try:
+                if p["status"] == "opening":
+                    await self._finish_entry(p)
+                elif p["status"] == "closing":
+                    if p.get("exit_order"):
+                        await self._final_read(p["exit_order"])
+                    await self._poll_exit(self.store.position(p["id"]), time.time() + 3600)
+                    p2 = self.store.position(p["id"])
+                    if p2["status"] == "closing":
+                        self.store.update_position(p["id"], status="open", exit_order=None)
+                elif p.get("lock_order"):
+                    await self._lock_poll(p)
+            except Exception as e:  # noqa: BLE001 - the kill switch must finish
+                self.store.event("error", f"kill: position {p['id']}: {e}", "ERROR")
         self.store.event("kill", reason, "WARNING", canceled=n)
         self._alert("KILL SWITCH - trading halted", f"{reason}. Canceled {n} open orders. "
                     "Open positions are left for you to manage.", "warn", "risk")
@@ -177,7 +187,7 @@ class AutoTrader:
         except Exception as e:  # noqa: BLE001
             self._api_error("startup cancel_all", e)
         for p in self.store.active_positions():
-            for col, purpose in (("entry_order", "entry"), ("exit_order", "exit")):
+            for col, purpose in (("entry_order", "entry"), ("exit_order", "exit"), ("lock_order", "lock")):
                 oid = p.get(col)
                 if not oid or oid in self.broker.orders:
                     continue
@@ -189,6 +199,9 @@ class AutoTrader:
                 await self._finish_entry(self.store.position(p["id"]))
             elif p["status"] == "closing":
                 await self._poll_exit(self.store.position(p["id"]), time.time() + 3600)
+            p = self.store.position(p["id"])
+            if p["status"] == "open" and p.get("lock_order") in self.broker.orders:
+                await self._lock_poll(p)          # book fills the lock got while the bot was down
 
     async def start(self) -> None:
         await self.recover()
@@ -411,30 +424,38 @@ class AutoTrader:
             await self._poll_exit(p, now)
             return
         if p["status"] == "resolving" or (m and m.hold_phase_from is not None and now >= m.hold_phase_from):
-            await self._cancel_lock(p)
-            p = self.store.position(p["id"])
+            p = await self._cancel_lock(p)
+            if p is None:                          # lock not confirmed canceled yet: try again next tick
+                return
             if p["status"] == "closed":
                 return
             await self._resolve(p, now)
             return
-        p = await self._lock_sync(p, m, now)
+        # 1) book any fills of the resting lock, 2) exit rules, 3) only while holding: keep a lock working
+        p = await self._lock_poll(p)
         if p is None or p["status"] != "open":
             return
-        await self._evaluate_exit(p, m, now)
+        if await self._evaluate_exit(p, m, now):
+            return
+        p = self.store.position(p["id"])
+        if p["status"] == "open":
+            await self._lock_place(p, m, now)
 
     # ------------------------------------------------------------ resting profit-lock SELL
     def _lock_account(self, p: dict, o) -> dict:
-        """Book any new fills of the lock order into the position (maker: no fee). Returns fresh p."""
-        prev = self._lock_seen.get(o.order_id, (0.0, 0.0, 0.0))
+        """Book NEW fills of the lock order into the position (maker: no fee). What has already been booked
+        for the current lock is stored on the position (lock_filled/lock_notional/lock_fee), so a restart
+        can neither lose nor double-count fills. Returns fresh p."""
+        prev = (p.get("lock_filled") or 0.0, p.get("lock_notional") or 0.0, p.get("lock_fee") or 0.0)
         d_sh, d_not, d_fee = o.filled - prev[0], o.notional - prev[1], o.fee - prev[2]
         if d_sh <= 1e-9:
             return p
-        self._lock_seen[o.order_id] = (o.filled, o.notional, o.fee)
         sold = (p["exit_shares"] or 0) + d_sh
         proceeds = (p["exit_proceeds"] or 0) + d_not
         fee = (p["exit_fee"] or 0) + d_fee
         self.store.update_position(p["id"], exit_shares=sold, exit_proceeds=proceeds, exit_fee=fee,
-                                   exit_price=proceeds / sold if sold else None)
+                                   exit_price=proceeds / sold if sold else None,
+                                   lock_filled=o.filled, lock_notional=o.notional, lock_fee=o.fee)
         self.store.event("fill", f"SOLD {p['side']} {d_sh:.2f} @ {d_not / d_sh:.3f} (resting profit lock)",
                          position=p["id"], order=o.order_id)
         self._alert(f"Profit lock filled: {p['duration']} {p['side']} {d_sh:g} @ {d_not / d_sh:.2f}",
@@ -448,14 +469,33 @@ class AutoTrader:
             return self.store.position(p["id"])
         return p
 
+    async def _final_read(self, oid: str, tries: int = 10, wait_s: float = 0.2):
+        """LIVE: re-read an order from the exchange until it reports a final state (filled / canceled /
+        rejected). Needed after a cancel or cancel-all, which mark orders canceled locally without reading
+        the fills that raced them. Returns the order, or None if it is still not final."""
+        o = self.broker.orders.get(oid)
+        if o is None:
+            return None
+        if self.mode != "live":
+            return o if o.done else await self.broker.poll(oid)
+        for i in range(tries):
+            o.status = "live"                      # force a fresh read
+            o = await self.broker.poll(oid)
+            if o.done:
+                return o
+            if i < tries - 1:
+                await asyncio.sleep(wait_s)
+        return None
+
     async def _lock_refresh(self, oid: str):
         o = self.broker.orders.get(oid)
         if o is None:
             return None
-        if o.done and o.status == "canceled" and self.mode == "live" and not getattr(o, "_final", False):
-            o.status = "live"                     # canceled by a cancel-all: read its final fills once
-            o = await self.broker.poll(oid)
-            o._final = True
+        if o.done and self.mode == "live" and not getattr(o, "_final", False):
+            o2 = await self._final_read(oid)       # canceled by a cancel-all: read its final fills once
+            if o2 is not None:
+                o2._final = True
+                return o2
             return o
         return await self.broker.poll(oid)
 
@@ -473,44 +513,67 @@ class AutoTrader:
         price = round(round((float(entry) + float(off)) / tick) * tick, 6)
         return min(price, cap)
 
-    async def _lock_sync(self, p: dict, m, now: float):
-        price = self._lock_price(p, m) if m is not None else None
-        if not price or m is None:
-            return p
+    async def _lock_poll(self, p: dict):
+        """Refresh the current lock order (if any), book its fills, forget it once it is finished."""
         oid = p.get("lock_order")
-        if oid:
-            o = await self._lock_refresh(oid)
-            if o is not None:
-                self.store.order(o, p["id"], "lock")
-                p = self._lock_account(p, o)
-                if p["status"] != "open":
-                    return p
-                if not o.done:
-                    return p
+        if not oid:
+            return p
+        o = await self._lock_refresh(oid)
+        if o is None:
+            # unknown order (e.g. adopt failed): keep the id so reconciliation can flag a real problem
+            return p
+        self.store.order(o, p["id"], "lock")
+        p = self._lock_account(p, o)
+        if p["status"] != "open":
+            return p
+        if o.done:
             self.store.update_position(p["id"], lock_order=None)
             p = self.store.position(p["id"])
+        return p
+
+    async def _lock_place(self, p: dict, m, now: float) -> None:
+        """Keep a resting SELL for the held shares at the lock price (only called while holding)."""
+        price = self._lock_price(p, m) if m is not None else None
+        if not price or m is None or p.get("lock_order"):
+            return
         held = round(p["shares"] - (p["exit_shares"] or 0), 2)
         if held < max(m.min_size, 0.01) or (m.hold_phase_from is not None and now >= m.hold_phase_from - 1):
-            return p
+            return
+        book = self.module.book(p["token"]) or {}
+        if book.get("bids") and book["bids"][0][0] >= price - 1e-9:
+            return                                 # bid already there: the exit check sells at the bid
+        if now - self._lock_rejected.get(p["id"], 0) < 2.0:
+            return                                 # don't hammer the exchange with rejected post-only orders
         o = await self.broker.place_limit(token=p["token"], side="SELL", price=float(price), size=held,
                                           post_only=True)
         o.purpose = "lock"
         self.store.order(o, p["id"], "lock")
-        if o.status == "rejected":                # bid already at/above the lock price: lock-in rule sells
-            return p
-        self._lock_seen[o.order_id] = (0.0, 0.0, 0.0)
-        self.store.update_position(p["id"], lock_order=o.order_id)
+        if o.status == "rejected":
+            self._lock_rejected[p["id"]] = now
+            return
+        self.store.update_position(p["id"], lock_order=o.order_id, lock_filled=0.0, lock_notional=0.0,
+                                   lock_fee=0.0)
         self.store.event("order", f"resting profit lock: SELL {p['side']} {held:.2f} @ {float(price):.2f}",
                          position=p["id"], order=o.order_id)
-        return self._lock_account(self.store.position(p["id"]), o) if o.filled else self.store.position(p["id"])
+        if o.filled:
+            self._lock_account(self.store.position(p["id"]), o)
 
-    async def _cancel_lock(self, p: dict) -> dict:
+    async def _cancel_lock(self, p: dict):
+        """Cancel the resting lock and book every fill it got. Returns fresh p, or None if the exchange has
+        not confirmed the cancel yet (then the caller must NOT sell: those shares may still be sold)."""
         oid = p.get("lock_order")
         if not oid:
             return p
         o = self.broker.orders.get(oid)
         if o is not None:
-            o = await self.broker.cancel(oid)
+            if not o.done:
+                o = await self.broker.cancel(oid)
+            if self.mode == "live":
+                o = await self._final_read(oid)
+                if o is None:
+                    self.store.event("warning", f"lock {oid}: cancel not confirmed yet, sale postponed",
+                                     "WARNING", position=p["id"])
+                    return None
             self.store.order(o, p["id"], "lock")
             p = self._lock_account(p, o)
         if p["status"] != "closed":
@@ -528,18 +591,27 @@ class AutoTrader:
                              fee_schedule=m.fee_schedule if m else None)
         t_decide = time.time()
         dec = self.module.exit_decision(p, val, now)
+        lock_px = self._lock_price(p, m)
+        if (dec.action != "SELL" and lock_px and book["bids"] and book["bids"][0][0] >= lock_px - 1e-9
+                and val.shares_sellable > 0):
+            # buyers already at/above the profit-lock price (no lock resting there yet): sell at the bid
+            from .rules import ExitDecision
+            dec = ExitDecision("SELL", f"bid {book['bids'][0][0]:.2f} >= profit-lock price {lock_px:.2f}",
+                               "profit_lock")
         self.store.update_position(p["id"], last_value=val.net, last_pnl=val.pnl,
                                    last_note=dec.reason[:200])
         self._trace(p, book, dec, m, now)
         if dec.action != "SELL" or not book["bids"]:
-            return
+            return False
         if p.get("lock_order"):                    # sell rule fired first: pull the resting lock, then sell
             p = await self._cancel_lock(p)
+            if p is None:                          # cancel not confirmed: never risk selling twice
+                return True
             if p["status"] != "open":
-                return
+                return True
             shares = p["shares"] - (p["exit_shares"] or 0)
             if shares <= 1e-6:
-                return
+                return True
         tick = m.tick_size if m else 0.01
         floor = round_price(max(tick, book["bids"][0][0] - int(self.xc.get("exit_slippage_ticks", 2)) * tick), tick)
         t_send = time.time()
@@ -557,6 +629,7 @@ class AutoTrader:
             self.store.update_position(p["id"], status="open", exit_order=None)
             raise BrokerError(f"exit rejected: {o.error}")
         await self._poll_exit(self.store.position(p["id"]), now)
+        return True
 
     def _trace(self, p: dict, book: dict, dec, m, now: float) -> None:
         """Per-position trace: a row when the bid or decision changes, at least every second."""
@@ -581,6 +654,8 @@ class AutoTrader:
                          f"decide->send {(t_send - t_decide) * 1000:.0f} ms, ack {ack_ms:.0f} ms) {dec.trigger}",
                          position=p["id"], price_to_order_ms=round(send_ms), data_age_ms=round(data_ms),
                          ack_ms=round(ack_ms))
+        if dec.trigger not in ("lock_in", "late_exit", "profit_take"):
+            return                                # model-driven exits aren't a reaction to a price change
         self._latency = (self._latency + [send_ms])[-20:]
         limit = float(self.xc.get("latency_alert_ms", 1000))
         if len(self._latency) >= 5:
