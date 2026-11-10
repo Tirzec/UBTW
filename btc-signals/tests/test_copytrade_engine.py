@@ -330,3 +330,88 @@ def test_stale_positions_do_not_halve_a_full_exit():
     finally:
         L.asyncio.sleep = real_sleep
     assert t.sell_fraction == 1.0                               # 50 sold, positions still showed them
+
+
+# ------------------------------------------------------------------ second review round
+def test_gateway_keeps_query_string_and_retries_429():
+    import httpx
+    seen = []
+
+    def handler(req):
+        seen.append(req.url)
+        if len(seen) == 1:
+            return httpx.Response(429, headers={"retry-after": "0.01"})
+        return httpx.Response(200, json={"events": []})
+
+    async def run():
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        m = CopyTradeModule(_Eng(), {"copytrade": {"traders": [{"name": "T", "wallet": "0xaa"}]}}, client=client)
+        return await m._gw("/v1/events?categories=politics&limit=100&offset=200")
+    assert asyncio.run(run()) == {"events": []}
+    q = dict(seen[-1].params)
+    assert q["categories"] == "politics" and q["limit"] == "100" and q["offset"] == "200" and "_" in q
+    assert len(seen) == 2
+
+
+def test_data_error_does_not_use_up_the_entry():
+    import httpx
+    m = _module(_Store())
+    from app.copytrade.leaders import LeaderTrade
+
+    async def boom(t):
+        raise httpx.ConnectTimeout("x")
+    m._map = boom
+    t = LeaderTrade(wallet="0xaa", name="T", side="BUY", token_id="TOK", condition_id="c", slug="x",
+                    event_slug="e", title="t", outcome="Yes", outcome_index=0, size=5, price=0.5,
+                    first_ts=time.time(), seen_ts=time.time())
+    asyncio.run(m.on_trade(t))
+    assert ("0xaa", "TOK") not in m.last_copy                  # their next fill can still be copied
+
+
+def test_hold_phase_follows_the_us_market_not_the_estimate():
+    m = _module(_Store())
+    m.meta["s"] = {"resolve_ts": time.time() - 600, "league": "nfl"}          # estimated end already passed
+    m.us_markets["s"] = {"status": "MARKET_STATUS_OPEN"}
+    assert m.market("s").hold_phase_from > time.time()                         # overtime: still mirror sells
+    m.us_markets["s"] = {"status": "MARKET_STATUS_CLOSED"}
+    assert m.market("s").hold_phase_from <= time.time()
+
+
+def test_sells_made_while_stopped_are_caught_up():
+    from app.copytrade.leaders import LeaderWatcher
+    rows = [{"timestamp": 500, "token_id": "TOK", "side": "SELL", "price": 0.7, "size": 10, "transaction_hash": "s"},
+            {"timestamp": 100, "token_id": "TOK", "side": "BUY", "price": 0.5, "size": 10, "transaction_hash": "b"},
+            {"timestamp": 600, "token_id": "OTHER", "side": "SELL", "price": 0.7, "size": 1, "transaction_hash": "o"}]
+
+    class W(LeaderWatcher):
+        async def _get(self, path, params):
+            if path == "positions":
+                return {"data": []}
+            return {"data": rows, "pagination": {"has_more": False}}
+
+    w = W(client=None, traders=[{"wallet": "0xaa", "name": "T"}])
+    w.catchup = {("0xaa", "TOK"): 200}                          # our copy was opened at t=200
+    out = asyncio.run(w.poll("0xaa"))
+    assert [(t.side, t.token_id) for t in out] == [("SELL", "TOK")] and out[0].sell_fraction == 1.0
+
+
+def test_resume_while_stopped_applies_at_startup(tmp_path):
+    from app.db import DB
+    from app.trading.store import TradeStore
+    from app.trading.trader import AutoTrader
+    from app.trading.broker import PaperBroker
+    db = DB(str(tmp_path / "t.db"))
+    st = TradeStore(db, "paper", "polymarket_us", "copytrade")
+    st.set_state("risk:copytrade", {"halted": True, "halt_reason": "KILL SWITCH: x", "halted_at": 100.0})
+    st.set_state("resume_requested", 200.0)
+
+    class M(CopyTradeModule):
+        pass
+    mod = _module(st)
+    t = AutoTrader(_Eng(), {}, PaperBroker(lambda k: None, lambda k, s: [], lambda k: {}), st, module=mod,
+                   exec_conf={"risk": {}})
+    assert not t.risk.state.halted
+    st.set_state("risk:copytrade", {"halted": True, "halt_reason": "KILL SWITCH: y", "halted_at": 300.0})
+    t2 = AutoTrader(_Eng(), {}, PaperBroker(lambda k: None, lambda k, s: [], lambda k: {}), st, module=mod,
+                    exec_conf={"risk": {}})
+    assert t2.risk.state.halted                                   # a STOP after the resume still wins

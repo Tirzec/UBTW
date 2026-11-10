@@ -90,6 +90,7 @@ class LeaderWatcher:
         self.last_fill_ts: dict[str, float] = {}
         self.errors: dict[str, str] = {}
         self.lags: list[float] = []
+        self.catchup: dict[tuple, float] = {}      # (wallet, token) -> since: copies still open at startup
 
     async def _get(self, path: str, params: dict) -> dict:
         p = dict(params)
@@ -120,11 +121,18 @@ class LeaderWatcher:
         self.last_poll[wallet] = now
         if new:
             self.last_fill_ts[wallet] = max(float(r.get("timestamp") or 0) for r in new)
-        if not self.ready.get(wallet):          # baseline: never copy what happened before we started
+        if not self.ready.get(wallet):          # baseline: never copy BUYS from before we started ...
             self.ready[wallet] = True
             if self.last_fill_ts.get(wallet) is None and new:
                 self.last_fill_ts[wallet] = max(float(r.get("timestamp") or 0) for r in new)
-            return []
+            # ... but SELLS of positions we still hold, made while the bot was stopped, must be mirrored
+            late = [r for r in new if r.get("side") == "SELL"
+                    and float(r.get("timestamp") or 0) > self.catchup.get((wallet, str(r.get("token_id"))), 1e18)]
+            out = group_new(late, wallet, name, now)
+            for t in out:
+                log.warning("copytrade: %s sold %s while the bot was stopped: mirroring it now", name, t.title)
+                await self._sell_fraction(t)
+            return out
         out = group_new(new, wallet, name, now)
         for t in out:
             self.lags.append(t.lag_s)

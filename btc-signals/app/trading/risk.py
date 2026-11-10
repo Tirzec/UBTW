@@ -32,7 +32,8 @@ class RiskState:
     day_stop_reason: str = ""        # "loss_limit" | "streak"
     consecutive_losses: int = 0
     api_errors: list[float] = field(default_factory=list)
-    maintenance_until: float = 0.0   # matching engine restart / post-only mode
+    maintenance_until: float = 0.0
+    halted_at: float = 0.0   # matching engine restart / post-only mode
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if k != "api_errors"} | {
@@ -76,6 +77,7 @@ class RiskManager:
     # ---------------------------------------------------------------- events
     def halt(self, reason: str) -> None:
         self.state.halted, self.state.halt_reason = True, reason
+        self.state.halted_at = time.time()
 
     def resume(self) -> None:
         self.state.halted, self.state.halt_reason = False, ""

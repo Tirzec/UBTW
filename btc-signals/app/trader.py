@@ -150,7 +150,8 @@ def main(argv=None) -> None:
     elif a.command == "resume":
         _set(c, "kill_requested", None)
         _set(c, "resume_requested", time.time())
-        print("Resume requested: the running bot resumes within ~1 second.")
+        print("Resume requested: a running bot resumes within ~1 second; if the bot is stopped, "
+              "it starts resumed.")
     elif a.command == "entries":
         from .db import DB
         from .entry_report import analyse as entry_analyse, format_report as entry_format
@@ -190,10 +191,29 @@ def main(argv=None) -> None:
     elif a.command in ("fills", "reconcile"):
         print(asyncio.run(_account_report(cfg, a.command, c)))
     elif a.command == "status":
-        key = "live:risk" if (cfg.get("trading", {}) or {}).get("mode") == "live" else "risk"
-        risk = c.execute("SELECT value FROM bot_state WHERE key=?", (key,)).fetchone()
+        live = (cfg.get("trading", {}) or {}).get("mode") == "live"
+        mods = []
+        if ((cfg.get("modules", {}) or {}).get("crypto_updown", {}) or {}).get("enabled", True):
+            mods.append(("crypto", ("live:" if live else "") + "risk"))
+        if (cfg.get("sports", {}) or {}).get("enabled"):
+            mods.append(("sports", ("live:" if live else "") + "risk:sports"))
+        if (cfg.get("copytrade", {}) or {}).get("enabled"):
+            mods.append(("copy trading (PAPER)", "risk:copytrade"))
         print("mode:", (cfg.get("trading", {}) or {}).get("mode", "paper"))
-        print("risk:", json.dumps(json.loads(risk["value"]) if risk else {}, indent=2))
+        ks = c.execute("SELECT value FROM bot_state WHERE key='kill_requested'").fetchone()
+        if ks and json.loads(ks["value"] or "null"):
+            print("KILL SWITCH IS SET:", ks["value"], "(run resume.bat to clear)")
+        for label, key in mods:
+            row = c.execute("SELECT value FROM bot_state WHERE key=?", (key,)).fetchone()
+            r = json.loads(row["value"]) if row else {}
+            state = f"HALTED: {r.get('halt_reason')}" if r.get("halted") else "running"
+            print(f"{label}: {state} | today P&L {r.get('day_pnl', 0):+.2f} over {r.get('day_trades', 0)} trades | "
+                  f"losses in a row {r.get('consecutive_losses', 0)}")
+            if key == "risk:copytrade":
+                for k2, title in (("copy:paused", "paused traders"), ("copy:rescore", "weekly re-score")):
+                    row = c.execute("SELECT value FROM bot_state WHERE key=?", (k2,)).fetchone()
+                    for w, v in (json.loads(row["value"]) if row else {}).items():
+                        print(f"  {title}: {v if isinstance(v, str) else (v.get('name'), v.get('alert') or 'ok')}")
         for r in c.execute("SELECT * FROM bot_positions WHERE status IN ('opening','open','closing','resolving')"):
             print(f"  #{r['id']} {r['mode']} {r['slug']} {r['side']} {r['status']} shares={r['shares']:.2f} "
                   f"entry={r['entry_price'] or 0:.2f} last_pnl={r['last_pnl'] or 0:+.3f}")

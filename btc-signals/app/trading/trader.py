@@ -89,6 +89,11 @@ class AutoTrader:
         st = RiskState(**{k: v for k, v in saved.items() if k in RiskState.__dataclass_fields__})
         self.risk = RiskManager(xc.get("risk", {}) or {}, st)
         self._last_resume_seen = float(store.get_state("resume_requested") or 0)
+        if st.halted and st.halted_at and not store.get_state("kill_requested") \
+                and self._last_resume_seen > st.halted_at:
+            self.risk.resume()                          # resume.bat was run while the bot was stopped
+            store.set_state(self.risk_key, {k: v for k, v in self.risk.state.__dict__.items() if k != "api_errors"})
+            store.event("resume", "resume requested while the bot was stopped: applied at startup", "WARNING")
         if global_risk is not None:
             global_risk.register(self)
         self._recompute_day()

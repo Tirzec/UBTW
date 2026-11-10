@@ -120,6 +120,7 @@ class CopyTradeModule(StrategyModule):
         self._pol_index: list = []
         self._pol_index_ts = 0.0
         self._gw_sem_obj: Optional[asyncio.Semaphore] = None
+        self._gw_block_until = 0.0
         self.store = None
         self.trader = None
         self.watcher = LeaderWatcher(self.client, self.traders, float(self.cc.get("poll_interval_s", 3)))
@@ -132,10 +133,12 @@ class CopyTradeModule(StrategyModule):
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
         self.keep = {str(k): float(v) for k, v in (self.store.get_state("copy:keep") or {}).items()}
+        catchup: dict = {}
         for p in self.store.active_positions():          # positions recovered after a restart
             if p.get("copy_leader") and p.get("copy_src_token"):
                 k = (p["copy_leader"], p["copy_src_token"])
                 self.last_copy[k] = max(self.last_copy.get(k, 0), p.get("opened_ts") or 0)
+                catchup[k] = min(catchup.get(k, 1e18), p.get("opened_ts") or 0)
             if self.keep.get(str(p["id"]), 1.0) < 1.0:
                 self.sell_targets[p["id"]] = {"ts": time.time(), "why": "copied sale (resumed after restart)"}
             try:
@@ -144,6 +147,7 @@ class CopyTradeModule(StrategyModule):
                 log.warning("copytrade: could not load %s at startup: %s", p["slug"], e)
             if p.get("copy_resolve_ts"):
                 self.meta.setdefault(p["slug"], {})["resolve_ts"] = p["copy_resolve_ts"]
+        self.watcher.catchup = catchup                 # their sells while we were stopped still count
         g = self.engine._guard
         for name, coro in (("copy-leaders", self.watcher.run(self.on_trade)), ("copy-books", self._books_loop()),
                            ("copy-review", self._review_loop())):
@@ -162,21 +166,42 @@ class CopyTradeModule(StrategyModule):
             self._gw_sem_obj = asyncio.Semaphore(3)
         return self._gw_sem_obj
 
-    async def _gw(self, path: str) -> Optional[dict]:
-        async with self._gw_sem:
-            r = await self.client.get(GATEWAY + path, params=nocache())
-            await asyncio.sleep(0.1)                       # well under the shared 25 req/s gateway limit
-        if r.status_code == 404:
-            return None
-        r.raise_for_status()
-        return r.json()
+    async def _gw(self, path: str, tries: int = 4) -> Optional[dict]:
+        """GET a Polymarket US gateway path (its own query string is KEPT: httpx >= 0.28 would drop it if we
+        passed params=). 404 -> None. 429 / 5xx -> wait (Retry-After) and retry; every caller then waits too."""
+        url = httpx.URL(GATEWAY + path).copy_merge_params(nocache())
+        for i in range(tries):
+            wait = self._gw_block_until - time.time()
+            if wait > 0:
+                await asyncio.sleep(min(wait, 60))
+            async with self._gw_sem:
+                r = await self.client.get(url)
+                await asyncio.sleep(0.1)                   # well under the shared 25 req/s gateway limit
+            if r.status_code == 404:
+                return None
+            if r.status_code == 429 or r.status_code >= 500:
+                try:
+                    ra = float(r.headers.get("retry-after") or 0)
+                except ValueError:
+                    ra = 0.0
+                self._gw_block_until = time.time() + (ra or 3.0 * (i + 1))
+                if i < tries - 1:
+                    continue
+            r.raise_for_status()
+            return r.json()
+        return None
 
     async def _gamma(self, path: str, params: dict, ttl: float = 600) -> list:
         k = path + json.dumps(params, sort_keys=True)
         hit = self._gamma_cache.get(k)
         if hit and time.time() - hit[0] < ttl:
             return hit[1]
-        r = await self.client.get(GAMMA + path, params=params)
+        for i in range(3):
+            r = await self.client.get(GAMMA + path, params=params)
+            if (r.status_code == 429 or r.status_code >= 500) and i < 2:
+                await asyncio.sleep(2.0 * (i + 1))
+                continue
+            break
         r.raise_for_status()
         d = r.json() or []
         now = time.time()
@@ -235,8 +260,12 @@ class CopyTradeModule(StrategyModule):
             else:
                 self._copy_sell(t)
         except httpx.HTTPError as e:
+            if t.side == "BUY":                       # their next fills of this entry may still be copied
+                self.last_copy.pop((t.wallet, t.token_id), None)
             self._decide(t, "skip", f"data error: {type(e).__name__}")
         except Exception as e:  # noqa: BLE001 - one odd trade must never stop copying the others
+            if t.side == "BUY":
+                self.last_copy.pop((t.wallet, t.token_id), None)
             log.exception("copytrade: trade %s %s", t.name, t.slug)
             self._decide(t, "skip", f"internal error: {type(e).__name__}: {e}"[:200])
 
@@ -303,7 +332,11 @@ class CopyTradeModule(StrategyModule):
         if opp or any(p["slug"] == slug and p["token"] != token for p in self.store.active_positions()):
             return self._decide(t, "skip", "approved traders are on opposite sides of this market", token=token)
         m = await self._load_market(slug)
-        if not m or m.get("status") != "MARKET_STATUS_OPEN":
+        if not m:
+            self.last_copy.pop((t.wallet, t.token_id), None)
+            return self._decide(t, "skip", "could not load the Polymarket US market (will retry on their next fill)",
+                                token=token)
+        if m.get("status") != "MARKET_STATUS_OPEN":
             return self._decide(t, "skip", "Polymarket US market is not open", token=token)
         res_ts = r.get("resolve_ts")
         if res_ts is None:
@@ -317,6 +350,10 @@ class CopyTradeModule(StrategyModule):
             return self._decide(t, "skip", f"already ${held:.2f} in this market (max "
                                 f"${float(cc.get('max_per_market_usd', 3.0)):g})", token=token)
         await self._load_book(slug)
+        if self.books.get(token) is None:
+            self.last_copy.pop((t.wallet, t.token_id), None)
+            return self._decide(t, "skip", "could not load the US order book (will retry on their next fill)",
+                                token=token)
         tick = float(m.get("orderPriceMinTickSize") or 0.01)
         limit, ask, why = copy_checks(their_price=t.price, book=self.books.get(token), tick=tick, stake=stake,
                                       max_worse=float(cc.get("max_worse", 0.03)),
@@ -402,8 +439,15 @@ class CopyTradeModule(StrategyModule):
                 return None
             m = {}                                    # not loaded yet (retried in the books loop): safe defaults
         res = meta.get("resolve_ts")
-        if res and (slug in self.settled or m.get("status") == "MARKET_STATUS_RESOLVED"):
-            res = min(res, time.time())               # resolved early: go straight to settlement
+        now = time.time()
+        status = m.get("status")
+        if slug in self.settled or (status and status != "MARKET_STATUS_OPEN"):
+            hold = now                                # closed/resolved on Polymarket US: wait for the settlement
+        elif res:                                     # still open: keep mirroring their sells (overtime, late
+            grace = 30 * 86400 if meta.get("league") == "politics" else 4 * 3600   # certification); fallback only
+            hold = res + float(self.cc.get("hold_grace_s", grace))
+        else:
+            hold = None
         min_size = float(m.get("minimumTradeQty") or 0.01)
         return MarketInfo(slug=slug, tick_size=float(m.get("orderPriceMinTickSize") or 0.01), min_size=min_size,
                           size_step=1.0 if min_size >= 1 else 0.01,
@@ -411,7 +455,7 @@ class CopyTradeModule(StrategyModule):
                                         "takerOnly": True, "round_cents": True},
                           condition_id=str(m.get("id") or ""), label=meta.get("label") or m.get("question") or slug,
                           entry_deadline=(res - float(self.cc.get("min_time_to_resolution_s", 3600))) if res else None,
-                          hold_phase_from=res, seconds_left=(res - time.time()) if res else None)
+                          hold_phase_from=hold, seconds_left=(res - now) if res else None)
 
     def book(self, token: str) -> Optional[dict]:
         return self.books.get(token)
@@ -487,7 +531,7 @@ class CopyTradeModule(StrategyModule):
                         await self.refresh_settlement(slug)      # catches markets that resolve early
                 except Exception as e:  # noqa: BLE001 - never let one market stop the loop
                     log.warning("copytrade book %s: %s", slug, e)
-            await asyncio.sleep(float(self.cc.get("book_poll_s", 2)))
+            await asyncio.sleep(float(self.cc.get("book_poll_s", 4)))
 
     def trader_stats(self) -> dict:
         """Per copied trader: copies, open, closed, P&L, win rate, average copy cost (our price - theirs)."""
