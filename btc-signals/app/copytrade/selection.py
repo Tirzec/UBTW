@@ -44,16 +44,27 @@ def group_fills(fills: list[dict], gap_s: int = 120, max_span_s: int = 300) -> l
             e["size"] += size
             e["t_last"] = f["timestamp"]
             e["fills"] += 1
+            e["pts"].append((f["timestamp"] - e["t"], size, px))
             continue
         e = {"token": tok, "condition": f.get("condition_id"), "side": side,
              "t": float(f["timestamp"]), "t_last": float(f["timestamp"]), "size": size, "notional": size * px,
              "slug": f.get("slug") or "", "event_slug": f.get("event_slug") or "", "title": f.get("title") or "",
-             "outcome": f.get("outcome"), "outcome_index": f.get("outcome_index"), "fills": 1}
+             "outcome": f.get("outcome"), "outcome_index": f.get("outcome_index"), "fills": 1,
+             "pts": [(0.0, size, px)]}                 # (seconds after the first fill, size, price)
         open_[key] = e
         out.append(e)
     for e in out:
         e["price"] = e["notional"] / e["size"]
     return sorted(out, key=lambda e: e["t"])
+
+
+def price_seen(e: dict, delay: float) -> float:
+    """The trader's average price over the fills a copier acting `delay` s after the first fill has seen
+    (later fills of the same burst are not known yet). Falls back to the whole-burst VWAP."""
+    pts = [(sz, px) for dt, sz, px in e.get("pts") or () if dt <= delay]
+    if not pts:
+        return e["price"]
+    return sum(sz * px for sz, px in pts) / sum(sz for sz, _ in pts)
 
 
 # ---------------------------------------------------------------- scoring
@@ -231,7 +242,8 @@ def backtest_copy(entries: list[dict], *, price_after, market_info, delays=(10, 
                     r.skip("no trade to price the copy")
                     note("skip", e, why="unpriced")
                     continue
-                if px > e["price"] + max_worse + 1e-9:
+                ref = price_seen(e, d)                 # their entry as far as a copier could know it
+                if px > ref + max_worse + 1e-9:
                     r.skip("price more than 3c worse")
                     note("skip", e, why=">3c", copy_price=px)
                     continue
@@ -247,7 +259,7 @@ def backtest_copy(entries: list[dict], *, price_after, market_info, delays=(10, 
                 r.copied += 1
                 r.cost += stake
                 r.fees += fee
-                r.gaps.append(buy - e["price"])
+                r.gaps.append(buy - ref)
                 note("buy", e, copy_price=px, paid=buy, shares=sh, fee=fee)
             else:                                       # SELL: reduce by the same fraction
                 held = theirs.get(tok, 0.0)

@@ -152,3 +152,37 @@ def test_sports_resolution_time_is_after_kickoff():
     assert info["mark"] == 0.6 and info["payout"] is None
     import calendar, time as _t
     assert info["end_ts"] == calendar.timegm(_t.strptime("2026-11-13 22:00:00", "%Y-%m-%d %H:%M:%S"))
+
+
+def test_pick_price_never_uses_a_print_after_the_window():
+    rows = [{"timestamp": 100 + 3600, "token_id": "A", "side": "BUY", "price": 0.11, "proxy_wallet": "0xo"}]
+    assert pick_price(lambda w: rows, "A", 100, "BUY") is None          # an hour later: unpriced, not 0.11
+
+
+def test_market_trades_pages_back_because_the_api_ignores_start_end():
+    from app.copytrade.intl import IntlData
+
+    pages = {None: ([{"timestamp": t} for t in range(5000, 3000, -100)], "c1"),
+             "c1": ([{"timestamp": t} for t in range(3000, 1000, -100)], "c2"),
+             "c2": ([{"timestamp": t} for t in range(1000, 0, -100)], None)}
+    calls = []
+
+    class Fake(IntlData):
+        def _get(self, url, params=None, tries=4):
+            calls.append(params.get("cursor"))
+            rows, nxt = pages[params.get("cursor")]
+            return {"data": rows, "pagination": {"has_more": nxt is not None, "next_cursor": nxt}}
+
+    api = Fake(client=object())
+    got = api.market_trades("m", 2000, 2200)
+    assert [r["timestamp"] for r in got] == [2200, 2100, 2000] and calls == [None, "c1"]
+    api.market_trades("m", 2500, 2600)                                      # served from the cache
+    assert calls == [None, "c1"]
+    assert [r["timestamp"] for r in api.market_trades("m", 0, 150)] == [100] and calls == [None, "c1", "c2"]
+
+
+def test_three_cent_rule_uses_only_the_fills_seen_by_copy_time():
+    from app.copytrade.selection import price_seen
+    e = group_fills([fill(1000, px=0.40, size=10), fill(1060, px=0.60, size=10)])[0]
+    assert e["price"] == pytest.approx(0.50)
+    assert price_seen(e, 30) == pytest.approx(0.40) and price_seen(e, 90) == pytest.approx(0.50)

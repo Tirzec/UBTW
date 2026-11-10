@@ -29,6 +29,9 @@ class IntlData:
         self._last = 0.0
         self._pace = threading.Lock()                # shared by worker threads: the pacing is global
         self._market_cache: dict[str, Optional[dict]] = {}
+        self._hist: dict[str, dict] = {}             # condition -> {"rows": newest first, "cursor", "done"}
+        self._hist_locks: dict[str, threading.Lock] = {}
+        self._hist_guard = threading.Lock()
         self._event_cache: dict[str, Optional[dict]] = {}
         self.calls = 0
 
@@ -132,23 +135,43 @@ class IntlData:
         rows = self.positions(wallet, "OPEN", start, max_rows, sort_by="TIMESTAMP")
         return [r for r in rows if r.get("redeemable")]
 
-    def market_trades(self, condition_id: str, start: int, end: int, limit: int = 1000,
-                      taker_only: bool = True) -> list[dict]:
-        """Fills in one market between start and end (newest first, one page). taker_only=True: each fill
-        once, from the taker's side (side = the aggressor's side on that token)."""
-        d = self._get(f"{DATA}/trades", {"condition": condition_id, "start": int(start), "end": int(end),
-                                         "limit": limit, "taker_only": "true" if taker_only else "false"})
-        return d.get("data") or []
+    def market_trades(self, condition_id: str, start: int, end: int, max_pages: int = 200) -> Optional[list[dict]]:
+        """Taker fills (each fill once, side = the aggressor's side) in one market with start <= ts <= end.
+
+        The Data API IGNORES start/end when filtering by condition (verified 2026-11-10: it always returns the
+        newest page of the whole market), so we page backwards with the cursor until the data reaches `start`
+        and filter here. Pages are cached per market. Returns None if the history could not be read back that far."""
+        with self._hist_guard:
+            lock = self._hist_locks.setdefault(condition_id, threading.Lock())
+        with lock:
+            h = self._hist.setdefault(condition_id, {"rows": [], "cursor": None, "done": False, "pages": 0})
+            while not h["done"] and (not h["rows"] or h["rows"][-1]["timestamp"] > start):
+                if h["pages"] >= max_pages:
+                    return None
+                p = {"condition": condition_id, "limit": 1000, "taker_only": "true"}
+                if h["cursor"]:
+                    p["cursor"] = h["cursor"]
+                d = self._get(f"{DATA}/trades", p)
+                h["rows"].extend(d.get("data") or [])
+                h["pages"] += 1
+                pg = d.get("pagination") or {}
+                h["cursor"] = pg.get("next_cursor")
+                if not pg.get("has_more") or not h["cursor"]:
+                    h["done"] = True
+            return [r for r in h["rows"] if start <= (r.get("timestamp") or 0) <= end]
 
     def price_after(self, condition_id: str, token_id: str, t: float, side: str = "BUY",
-                    exclude_wallet: str | None = None, window_s: int = 900,
+                    exclude_wallet: str | None = None, window_s: int = 60,
                     slice_s: int = 5) -> Optional[tuple[float, float]]:
-        """The price a copier could trade `token_id` at, at/after time t: from taker fills in the copier's
-        direction only (BUY -> someone lifting the ask; SELL -> someone hitting the bid). A taker trade on the
-        other outcome counts as the complement (each condition has exactly two tokens). The copied trader's
-        own fills are ignored. Worst print within the first `slice_s` seconds. Returns (timestamp, price)."""
-        return pick_price(lambda w: self.market_trades(condition_id, int(t), int(t) + w), token_id, t, side,
-                          exclude_wallet, windows=(15, 120, window_s), slice_s=slice_s)
+        """The price a copier could trade `token_id` at, in [t, t + window_s]: from other people's taker fills in
+        the copier's direction only (BUY -> someone lifting the ask; SELL -> someone hitting the bid). A taker
+        trade on the other outcome counts as the complement. Worst print within the first `slice_s` seconds of
+        the first matching fill. None when nothing traded that way in the window (the copy counts as unpriced:
+        no later print is ever used, so no look-ahead)."""
+        rows = self.market_trades(condition_id, int(t), int(t) + window_s)
+        if rows is None:
+            return None
+        return pick_price(lambda w: rows, token_id, t, side, exclude_wallet, windows=(window_s,), slice_s=slice_s)
 
     # ------------------------------------------------------------ gamma
     def market(self, condition_id: str) -> Optional[dict]:
@@ -185,15 +208,16 @@ def resolution_payout(market: Optional[dict], token_id: str) -> Optional[float]:
 
 
 def pick_price(fetch, token_id: str, t: float, side: str, exclude_wallet: str | None = None,
-               windows=(15, 120, 900), slice_s: int = 5) -> Optional[tuple[float, float]]:
-    """Pure part of price_after (unit-tested): fetch(window_s) -> taker fills in [t, t + window_s]."""
+               windows=(15, 60), slice_s: int = 5) -> Optional[tuple[float, float]]:
+    """Pure part of price_after (unit-tested): fetch(window_s) -> taker fills (rows outside [t, t + window_s]
+    are ignored even if fetch returns them)."""
     ex = (exclude_wallet or "").lower()
     cand: list[tuple[float, float]] = []
     for w in windows:                               # narrowest non-empty window wins (pages are newest first)
         cand = []
         for r in fetch(w):
             ts = r.get("timestamp")
-            if ts is None or ts < t or (ex and (r.get("proxy_wallet") or "").lower() == ex):
+            if ts is None or ts < t or ts > t + w or (ex and (r.get("proxy_wallet") or "").lower() == ex):
                 continue
             p = float(r["price"])
             if str(r.get("token_id")) == str(token_id):
