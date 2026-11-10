@@ -142,3 +142,40 @@ def test_lock_in_and_late_exit_rules():
     assert d.action == "SELL" and d.trigger == "late_exit"
     d = m.exit_decision(pos | {"slug": w.slug}, Valuation(1, 0.88, 0, 0.86, 0.86, -0.1, -0.1, True), late)
     assert d.action == "HOLD"                                     # not profitable: rule doesn't apply
+
+
+def test_settlement_fetched_from_exchange_when_window_not_tracked():
+    """A position held to resolution must settle even if the window dropped out of memory (restart)."""
+    import asyncio
+    from app.ingest.discovery import Window
+    from app.ingest.us_markets import us_slug
+    start = 1794271800
+    slug = us_slug("15m", start)
+    tracked = {}
+    settled = []
+
+    class Disc:
+        windows = tracked
+
+        def get(self, dur, st):
+            w = Window(dur, st, st + 900, us_slug(dur, st), venue="polymarket_us")
+            tracked[w.slug] = w
+            return w
+
+        async def refresh(self, w):
+            w.outcome = "DOWN"                         # what the exchange reports after settlement
+
+    eng = SimpleNamespace(durations=["15m"], discovery=Disc(), clob=None, alert=lambda *a, **k: None,
+                          _on_settled=lambda w: settled.append(w.slug))
+    m = CryptoFairModule(eng, {"trading": {}, "fair_value": {}})
+    pos = {"slug": slug, "side": "DOWN"}
+    assert m.settlement_per_share(pos) is None         # unknown: fetch scheduled (no loop here)
+
+    async def run():
+        assert m.settlement_per_share(pos) is None     # first call starts the fetch
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    m._settle_asked.clear()
+    asyncio.run(run())
+    assert m.settlement_per_share(pos) == 1.0 and settled == [slug]
+    assert m.settlement_per_share({"slug": slug, "side": "UP"}) == 0.0

@@ -15,6 +15,8 @@ PART 4  UP+DOWN arbitrage watcher. On Polymarket US both sides are one order boo
 """
 from __future__ import annotations
 
+import asyncio
+
 import statistics
 import time
 from collections import deque
@@ -49,6 +51,7 @@ class CryptoFairModule(StrategyModule):
         self.last_tick = 0
         self.arb: dict[str, dict] = {}
         self.ready: dict[str, dict] = {}
+        self._settle_asked: dict[str, float] = {}
         self.notes: dict[str, str] = {}
 
     # ------------------------------------------------------------ data
@@ -303,9 +306,36 @@ class CryptoFairModule(StrategyModule):
 
     def settlement_per_share(self, p: dict) -> Optional[float]:
         w = self.engine.discovery.windows.get(p["slug"])
-        if w is None or w.outcome is None:
-            return None
-        return 1.0 if w.outcome == p["side"] else 0.0
+        if w is not None and w.outcome is not None:
+            return 1.0 if w.outcome == p["side"] else 0.0
+        # The window may no longer be tracked (e.g. after a restart): ask the exchange directly.
+        now = time.time()
+        if now - self._settle_asked.get(p["slug"], 0) > 15:
+            self._settle_asked[p["slug"]] = now
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:                      # no running loop (unit tests)
+                loop = None
+            if loop is not None:
+                loop.create_task(self._fetch_settlement(p["slug"]))
+        return None
+
+    async def _fetch_settlement(self, slug: str) -> None:
+        from ..exit_report import _window
+        dur, start, _ = _window(slug)
+        if dur is None:
+            return
+        disc = self.engine.discovery
+        w = disc.get(dur, start)
+        if w.slug != slug:
+            return
+        try:
+            await disc.refresh(w)
+        except Exception as e:  # noqa: BLE001 - try again on the next check
+            self.notes["settlement"] = f"{slug}: {type(e).__name__}"
+            return
+        if w.outcome is not None and hasattr(self.engine, "_on_settled"):
+            self.engine._on_settled(w)                # records side_won for calibration
 
     def outcome_label(self, p: dict) -> str:
         w = self.engine.discovery.windows.get(p["slug"])

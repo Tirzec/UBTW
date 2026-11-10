@@ -3,6 +3,9 @@ Behaviour is unchanged: signals come from the engine's per-window evaluation, ex
 evaluate_bot_exit with the trading.exits settings, settlement from the window outcome."""
 from __future__ import annotations
 
+import asyncio
+import time
+
 from typing import Optional
 
 from ..trading.rules import evaluate_bot_exit
@@ -17,6 +20,8 @@ class CryptoUpDownModule(StrategyModule):
         tc = cfg.get("trading", {}) or {}
         self.ec = tc.get("entry", {}) or {}
         self.xc = tc.get("exits", {}) or {}
+        self._settle_asked: dict[str, float] = {}
+        self.notes: dict[str, str] = {}
 
     # ------------------------------------------------------------ entries
     def signals(self, now: float) -> list[Signal]:
@@ -86,9 +91,36 @@ class CryptoUpDownModule(StrategyModule):
 
     def settlement_per_share(self, p: dict) -> Optional[float]:
         w = self.engine.discovery.windows.get(p["slug"])
-        if w is None or w.outcome is None:
-            return None
-        return 1.0 if w.outcome == p["side"] else 0.0
+        if w is not None and w.outcome is not None:
+            return 1.0 if w.outcome == p["side"] else 0.0
+        # The window may no longer be tracked (e.g. after a restart): ask the exchange directly.
+        now = time.time()
+        if now - self._settle_asked.get(p["slug"], 0) > 15:
+            self._settle_asked[p["slug"]] = now
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:                      # no running loop (unit tests)
+                loop = None
+            if loop is not None:
+                loop.create_task(self._fetch_settlement(p["slug"]))
+        return None
+
+    async def _fetch_settlement(self, slug: str) -> None:
+        from ..exit_report import _window
+        dur, start, _ = _window(slug)
+        if dur is None:
+            return
+        disc = self.engine.discovery
+        w = disc.get(dur, start)
+        if w.slug != slug:
+            return
+        try:
+            await disc.refresh(w)
+        except Exception as e:  # noqa: BLE001 - try again on the next check
+            self.notes["settlement"] = f"{slug}: {type(e).__name__}"
+            return
+        if w.outcome is not None and hasattr(self.engine, "_on_settled"):
+            self.engine._on_settled(w)                # records side_won for calibration
 
     def outcome_label(self, p: dict) -> str:
         w = self.engine.discovery.windows.get(p["slug"])
