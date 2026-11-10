@@ -1,8 +1,9 @@
 """Copy trading step 2: fills -> trades, trader exclusions, delayed-copy backtest."""
 import pytest
 
-from app.copytrade.intl import resolution_payout
-from app.copytrade.selection import backtest_copy, group_fills, max_drawdown, score_trader
+from app.copytrade.__main__ import market_info_from
+from app.copytrade.intl import pick_price, resolution_payout
+from app.copytrade.selection import FAST_CRYPTO, backtest_copy, group_fills, max_drawdown, score_trader
 
 NOW = 2_000_000_000.0
 DAY = 86400
@@ -33,7 +34,7 @@ def test_score_excludes_market_makers_lucky_and_fast_crypto():
     s = score_trader(wallet="w", name="n", fills=mm, truncated=False, closed=_closed(60), pnl_points=[],
                      since=since, now=NOW)
     assert any("market maker" in w for w in s["excluded"])
-    lucky = _closed(58, 1.0) + _closed(2, 500.0)
+    lucky = _closed(58, 1.0) + _closed(2, 60.0)          # 1.0 x 58 = 58 < 120 from two bets
     s = score_trader(wallet="w", name="n", fills=ok, truncated=False, closed=lucky, pnl_points=[], since=since, now=NOW)
     assert any("1-2 bets" in w for w in s["excluded"])
     fast = [fill(since + i * 3600, tok=f"T{i}", cond=f"c{i}", slug="btc-updown-5m-123") for i in range(60)]
@@ -64,7 +65,7 @@ def test_backtest_delay_3c_rule_fees_proportional_sell_and_resolution():
     ])
     prices = {"m1": 0.52, "m2": 0.45, "m3": 0.30, "m4": 0.6}
 
-    def price_after(cond, tok, t):
+    def price_after(cond, tok, t, side="BUY", wallet=None):
         if cond == "m3" and t > 9500:
             return 0.50
         return prices[cond]
@@ -76,7 +77,8 @@ def test_backtest_delay_3c_rule_fees_proportional_sell_and_resolution():
     r = backtest_copy(entries, price_after=price_after, market_info=market_info, delays=(30,), slip=0.0,
                       fee_rate=0.0)[30]
     assert r["copied"] == 2
-    assert r["skipped"] == {"price more than 3c worse": 1, "market ends within 1 h": 1}
+    assert r["skipped"] == {"price more than 3c worse": 1, "market resolves within 1 h": 1}
+    assert r["closed"] == 2
     # A: 1/0.52 shares -> $1 each; C: half sold at 0.50, other half resolves at 0
     exp = (1 / 0.52 - 1) + ((1 / 0.30) * 0.5 * 0.5 - 0.5) + (0 - 0.5)
     assert r["pnl"] == pytest.approx(exp, abs=0.006)
@@ -91,3 +93,62 @@ def test_resolution_payout():
     assert resolution_payout(m, "2") == 1.0 and resolution_payout(m, "1") == 0.0
     assert resolution_payout({**m, "closed": False}, "2") is None
     assert resolution_payout({**m, "outcomePrices": '["0.3", "0.7"]'}, "2") is None
+
+
+def test_unredeemed_losers_count_in_win_rate_and_profit():
+    since = NOW - 90 * DAY
+    ok = [fill(since + i * 3600, tok=f"T{i}", cond=f"c{i}") for i in range(60)]
+    losers = [{"status": "OPEN", "redeemable": True, "current_value": 0, "avg_price": 0.5, "total_size": 10,
+               "realized_pnl": 0, "last_event_at": NOW - DAY} for _ in range(40)]
+    s = score_trader(wallet="w", name="n", fills=ok, truncated=False, closed=_closed(60) + losers, pnl_points=[],
+                     since=since, now=NOW)
+    assert s["win_rate"] == pytest.approx(0.6) and s["realized_pnl"] == pytest.approx(60 - 200)
+    assert "not profitable in the window" in s["excluded"]
+
+
+def test_fast_crypto_pattern_is_anchored():
+    for slug in ("btc-updown-15m-1730000000", "eth-updown-5m-1730000000", "bitcoin-up-or-down-15-min-nov-10"):
+        assert FAST_CRYPTO.search(slug), slug
+    for slug in ("will-mrbeast-hit-5m-subscribers-by-dec", "will-the-game-last-over-15-minutes", "nba-bos-phi"):
+        assert not FAST_CRYPTO.search(slug), slug
+
+
+def test_pick_price_uses_copier_side_and_ignores_the_trader():
+    rows = [
+        {"timestamp": 100, "token_id": "A", "side": "SELL", "price": 0.48, "proxy_wallet": "0xo"},   # bid hit
+        {"timestamp": 101, "token_id": "A", "side": "BUY", "price": 0.52, "proxy_wallet": "0xme"},   # the trader
+        {"timestamp": 102, "token_id": "B", "side": "SELL", "price": 0.47, "proxy_wallet": "0xo"},   # A ask 0.53
+        {"timestamp": 103, "token_id": "A", "side": "BUY", "price": 0.51, "proxy_wallet": "0xo"},
+    ]
+    assert pick_price(lambda w: rows, "A", 100, "BUY", "0xME") == (102.0, pytest.approx(0.53))   # worst in 5 s
+    assert pick_price(lambda w: rows, "A", 100, "SELL") == (100.0, pytest.approx(0.48))
+    assert pick_price(lambda w: [], "A", 100, "BUY") is None
+
+
+def test_sell_larger_than_seen_keeps_holding_instead_of_dumping():
+    entries = group_fills([fill(1000, tok="A", px=0.50, size=10, cond="m1"),
+                           fill(5000, tok="A", side="SELL", px=0.60, size=500, cond="m1")])   # pre-window shares
+    r = backtest_copy(entries, price_after=lambda *a: 0.5, market_info=lambda c, t: {"end_ts": 1e12, "payout": 1.0},
+                      delays=(10,), slip=0.0, fee_rate=0.0)[10]
+    assert r["skipped"].get("sell larger than the position we saw (fraction unknown, kept holding)") == 1
+    assert r["pnl"] == pytest.approx(1.0)                     # held to resolution: 2 shares x $1 - $1
+
+
+def test_backtest_only_copies_inside_window_but_tracks_holdings_before_it():
+    entries = group_fills([fill(1000, tok="A", px=0.50, size=100, cond="m1"),     # before copy window
+                           fill(6000, tok="A", px=0.50, size=100, cond="m1"),     # copied
+                           fill(9000, tok="A", side="SELL", px=0.60, size=100, cond="m1")])   # half of 200
+    r = backtest_copy(entries, price_after=lambda c, t, ts, side="BUY", w=None: 0.5 if side == "BUY" else 0.6,
+                      market_info=lambda c, t: {"end_ts": 1e12, "payout": 0.0}, delays=(10,), slip=0.0,
+                      fee_rate=0.0, copy_from=5000)[10]
+    assert r["copied"] == 1
+    assert r["pnl"] == pytest.approx(2 * 0.5 * 0.6 - 0.5 - 0.5)   # half sold at 0.6, half resolves at 0
+
+
+def test_sports_resolution_time_is_after_kickoff():
+    m = {"endDate": "2026-11-13T19:00:00Z", "gameStartTime": "2026-11-13 19:00:00+00", "closed": False,
+         "clobTokenIds": '["1", "2"]', "outcomePrices": '["0.4", "0.6"]'}
+    info = market_info_from(m, "2")
+    assert info["mark"] == 0.6 and info["payout"] is None
+    import calendar, time as _t
+    assert info["end_ts"] == calendar.timegm(_t.strptime("2026-11-13 22:00:00", "%Y-%m-%d %H:%M:%S"))

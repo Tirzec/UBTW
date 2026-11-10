@@ -105,10 +105,13 @@ class IntlData:
                 return out, True
         return out, False
 
-    def closed_positions(self, wallet: str, start: int | None = None, max_rows: int = 5000) -> list[dict]:
-        p: dict = {"user": wallet, "status": "CLOSED", "limit": 500}
+    def positions(self, wallet: str, status: str, start: int | None = None, max_rows: int = 5000,
+                  sort_by: str | None = None) -> list[dict]:
+        p: dict = {"user": wallet, "status": status, "limit": 500}
         if start:
             p["start"] = int(start)
+        if sort_by:
+            p["sort_by"] = sort_by
         out = []
         for row in self._pages("positions", p, max_pages=max_rows // 500 + 1):
             out.append(row)
@@ -116,30 +119,33 @@ class IntlData:
                 break
         return out
 
-    def market_trades(self, condition_id: str, start: int, end: int, limit: int = 1000) -> list[dict]:
-        """All fills in one market between start and end (newest first, one page)."""
+    def closed_positions(self, wallet: str, start: int | None = None, max_rows: int = 5000) -> list[dict]:
+        """Closed positions moved inside the window, newest first (sorted by time, NOT by P&L: the default
+        P&L order would keep only the biggest winners when capped)."""
+        return self.positions(wallet, "CLOSED", start, max_rows, sort_by="TIMESTAMP")
+
+    def resolved_open_positions(self, wallet: str, start: int | None = None, max_rows: int = 5000) -> list[dict]:
+        """Resolved but never redeemed (losers usually sit here at price 0): needed for honest win rates."""
+        rows = self.positions(wallet, "OPEN", start, max_rows, sort_by="TIMESTAMP")
+        return [r for r in rows if r.get("redeemable")]
+
+    def market_trades(self, condition_id: str, start: int, end: int, limit: int = 1000,
+                      taker_only: bool = True) -> list[dict]:
+        """Fills in one market between start and end (newest first, one page). taker_only=True: each fill
+        once, from the taker's side (side = the aggressor's side on that token)."""
         d = self._get(f"{DATA}/trades", {"condition": condition_id, "start": int(start), "end": int(end),
-                                         "limit": limit, "taker_only": "false"})
+                                         "limit": limit, "taker_only": "true" if taker_only else "false"})
         return d.get("data") or []
 
-    def price_after(self, condition_id: str, token_id: str, t: float, window_s: int = 900) -> Optional[tuple[float, float]]:
-        """First traded price of `token_id` at/after time t (the price a copier could get then), as
-        (timestamp, price). Fills of the other outcome count as 1 - price (binary markets)."""
-        rows = []
-        for w in (15, 120, window_s):                # narrow first: busy markets have > 1000 fills a window,
-            rows = self.market_trades(condition_id, int(t), int(t) + w)   # and pages come newest first
-            rows = [r for r in rows if r.get("timestamp") is not None and r["timestamp"] >= t]
-            if rows and len(rows) < 1000:
-                break
-            if rows and w == 15:
-                break                               # >= 1000 fills in 15 s: the earliest second is close enough
-        if not rows:
-            return None
-        first = min(rows, key=lambda r: r["timestamp"])
-        same = [r for r in rows if r["timestamp"] == first["timestamp"] and str(r.get("token_id")) == str(token_id)]
-        r = same[0] if same else first
-        px = float(r["price"]) if str(r.get("token_id")) == str(token_id) else 1.0 - float(r["price"])
-        return float(r["timestamp"]), px
+    def price_after(self, condition_id: str, token_id: str, t: float, side: str = "BUY",
+                    exclude_wallet: str | None = None, window_s: int = 900,
+                    slice_s: int = 5) -> Optional[tuple[float, float]]:
+        """The price a copier could trade `token_id` at, at/after time t: from taker fills in the copier's
+        direction only (BUY -> someone lifting the ask; SELL -> someone hitting the bid). A taker trade on the
+        other outcome counts as the complement (each condition has exactly two tokens). The copied trader's
+        own fills are ignored. Worst print within the first `slice_s` seconds. Returns (timestamp, price)."""
+        return pick_price(lambda w: self.market_trades(condition_id, int(t), int(t) + w), token_id, t, side,
+                          exclude_wallet, windows=(15, 120, window_s), slice_s=slice_s)
 
     # ------------------------------------------------------------ gamma
     def market(self, condition_id: str) -> Optional[dict]:
@@ -173,3 +179,30 @@ def resolution_payout(market: Optional[dict], token_id: str) -> Optional[float]:
         return None
     p = prices[toks.index(str(token_id))]
     return p if p in (0.0, 0.5, 1.0) else None
+
+
+def pick_price(fetch, token_id: str, t: float, side: str, exclude_wallet: str | None = None,
+               windows=(15, 120, 900), slice_s: int = 5) -> Optional[tuple[float, float]]:
+    """Pure part of price_after (unit-tested): fetch(window_s) -> taker fills in [t, t + window_s]."""
+    ex = (exclude_wallet or "").lower()
+    cand: list[tuple[float, float]] = []
+    for w in windows:                               # narrowest non-empty window wins (pages are newest first)
+        cand = []
+        for r in fetch(w):
+            ts = r.get("timestamp")
+            if ts is None or ts < t or (ex and (r.get("proxy_wallet") or "").lower() == ex):
+                continue
+            p = float(r["price"])
+            if str(r.get("token_id")) == str(token_id):
+                s_, px = r.get("side"), p
+            else:
+                s_, px = ("SELL" if r.get("side") == "BUY" else "BUY"), 1.0 - p
+            if s_ == side:
+                cand.append((float(ts), px))
+        if cand:
+            break
+    if not cand:
+        return None
+    t0 = min(ts for ts, _ in cand)
+    first = [px for ts, px in cand if ts <= t0 + slice_s]
+    return t0, (max(first) if side == "BUY" else min(first))
