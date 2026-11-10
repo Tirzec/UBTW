@@ -22,8 +22,16 @@ if (Test-Path $pidFile) {
 }
 Remove-Item $pidFile -ErrorAction SilentlyContinue        # stale file from a crash / power cut
 New-Item -ItemType Directory -Force (Join-Path $root "data") | Out-Null
-# an older start that never got going (e.g. hidden, waiting for the LIVE phrase) blocks every new start
-Stop-StuckBotProcesses $root "" | Out-Null
+# another bot process of this folder without data\bot.pid (e.g. an old hidden start waiting for the LIVE phrase)
+# blocks every new start. It could also be a running bot that lost its pid file, so it is not killed here:
+# stop-bot runs the kill switch first, then ends it.
+$stuck = @(Get-StuckBotProcesses $root "")
+if ($stuck.Count) {
+    Write-Host ("Another bot process from this folder is still running (PID {0}) but is not the recorded bot." -f `
+        (($stuck | ForEach-Object { $_.ProcessId }) -join ", ")) -ForegroundColor Red
+    Write-Host "Run .\windows\stop-bot.bat (kill switch + ends it), then .\windows\resume.bat, then start-bot again."
+    exit 1
+}
 $appArgs = "-m app.main"
 # LIVE mode asks you to type a confirmation phrase, which a hidden window can't show: open a visible one
 if (-not $Visible) {

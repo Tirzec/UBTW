@@ -191,7 +191,15 @@ def _check_us(cfg, tc, n, need, stats, problems, interactive, input_fn, account_
              else "no daily trade cap (switched off). ")
           + 
           "Positions are reconciled with the exchange every 60 s; any mismatch halts trading.")
-    print("Risk limits: " + limits_text(tc))
+    crypto_on = ((cfg.get("modules", {}) or {}).get("crypto_updown", {}) or {}).get("enabled", True)
+    if crypto_on:
+        print("Risk limits: " + limits_text(tc))
+    cc = cfg.get("copytrade", {}) or {}
+    if cc.get("enabled") and str(cc.get("mode", "paper")) == "live":
+        print(f"COPY TRADING with REAL MONEY: ${cc.get('stake_usd', 1)} per copied trade, at most "
+              f"${cc.get('max_per_market_usd', 3)} per market. Limits: " + limits_text(cc))
+        print("Copies use the approved traders' public trades on international Polymarket as the signal; "
+              "orders go to Polymarket US only.")
     print("Taker fee on Polymarket US: 0.095 x p x (1-p) per contract (0.0695 in your first 7 days).")
     print("Only trade money you can afford to lose. You must be 18+ (19 in AL/NE, 21 in MS) and in an "
           "eligible state.")

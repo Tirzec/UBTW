@@ -1,9 +1,9 @@
 # Shared by start-bot.ps1 and stop-bot.ps1 (dot-sourced).
 #
 # Finds bot processes ("python -m app.main") of THIS folder that are not the bot recorded in data\bot.pid.
-# Those are stuck: a bot writes data\bot.pid as soon as it is past its startup checks, so one without it never
-# got that far (for example an old background start waiting, invisibly, for the LIVE confirmation phrase).
-# A stuck one keeps data\console.log open, so every new background start fails.
+# Usually they are stuck (for example an old background start waiting, invisibly, for the LIVE confirmation
+# phrase) and keep data\console.log open, so every new background start fails. But a bot can also lose its
+# pid file while running, so only stop-bot (which runs the kill switch FIRST) ends them; start-bot refuses.
 #
 # The venv's python.exe is a small launcher that starts the real interpreter as a child, so a bot is usually
 # two python processes; both are matched (the child by its parent).
@@ -11,15 +11,16 @@
 function Get-StuckBotProcesses([string]$root, [string]$keepPid) {
     $procs = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" -ErrorAction SilentlyContinue)
     if (-not $procs) { return @() }
+    $needle = $root.TrimEnd('\') + '\'                          # "...\btc-signals\" never matches "...\btc-signals - Copy\"
     $byId = @{}
     foreach ($p in $procs) { $byId[[string]$p.ProcessId] = $p }
     $isOurs = {
         param($p)
         $cl = [string]$p.CommandLine
         if ($cl.IndexOf("-m app.main", [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
-        if ($cl.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+        if ($cl.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
         $parent = $byId[[string]$p.ParentProcessId]                  # child of the venv launcher
-        return ($parent -and ([string]$parent.CommandLine).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+        return ($parent -and ([string]$parent.CommandLine).IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0)
     }
     # the running bot (from data\bot.pid) and its launcher/child are never touched
     $keep = @{}

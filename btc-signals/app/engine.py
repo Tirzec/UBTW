@@ -208,6 +208,9 @@ class Engine:
             await self.trader.start()
         await self._start_sports()
         await self._start_copytrade()
+        if self.trade_mode == "live" and self.copytrade is not None:
+            self._tasks.append(asyncio.create_task(self._guard("leftovers", self._settle_leftovers_loop()),
+                                                   name="leftovers"))
         if self.reconciler is not None:
             self._tasks.append(asyncio.create_task(self._guard("reconcile", self.reconciler.run()),
                                                    name="reconcile"))
@@ -289,35 +292,106 @@ class Engine:
 
     async def _start_copytrade(self) -> None:
         """Copy trading: watch the approved traders on international Polymarket (read-only), copy onto
-        Polymarket US. PAPER ONLY in this build, whatever trading.mode says."""
+        Polymarket US. LIVE only when ALL of: trading.mode live and the live checks passed (typed confirmation),
+        copytrade.mode: live, and copytrade.min_paper_trades_for_live closed paper copies. Otherwise PAPER."""
         cc = self.cfg.get("copytrade", {}) or {}
         if not cc.get("enabled", False):
             return
         if self.venue != "polymarket_us":
             log.warning("copytrade needs venue: polymarket_us; not started")
             return
-        if str(cc.get("mode", "paper")) != "paper":
-            log.warning("copytrade.mode %r: live copying is not built yet - running in PAPER", cc.get("mode"))
         from .copytrade.module import CopyTradeModule
         from .trading.broker import PaperBroker
-        from .trading.store import TradeStore
+        from .trading.store import TradeStore, paper_count_from
         from .trading.trader import AutoTrader
+        need = int(cc.get("min_paper_trades_for_live", 300) or 0)
+        mode = "paper"
+        if str(cc.get("mode", "paper")) == "live":
+            if self.trade_mode != "live":
+                log.warning("copytrade.mode is live but trading.mode isn't (or the live checks were not "
+                            "passed) - copying in PAPER")
+            else:
+                done = len(TradeStore(self.db, "paper", self.venue, "copytrade").counted_paper_trades(
+                    paper_count_from(cc)))
+                if done >= need:
+                    mode = "live"
+                else:
+                    log.warning("copytrade stays in PAPER: %d/%d paper copies completed", done, need)
         self.copytrade = CopyTradeModule(self, self.cfg, self.http)
         if not self.copytrade.traders:
             log.warning("copytrade: no approved traders (copytrade.traders in config.yaml) - not started")
             return
-        store = TradeStore(self.db, "paper", self.venue, "copytrade")
+        store = TradeStore(self.db, mode, self.venue, "copytrade")
         ct = self.copytrade
 
         def fee_for(tok):
             m = ct.market(tok.rsplit(":", 1)[0])
             return m.fee_schedule if m else {"rate": 0.095, "exponent": 1, "takerOnly": True, "round_cents": True}
-        broker = PaperBroker(ct.books.get, ct.books.trades_since, fee_for, ioc_non_post_only=True)
-        t = AutoTrader(self, self.cfg, broker, store, module=ct, exec_conf=cc, global_risk=self.global_risk)
+
+        def tick_for(tok):
+            m = ct.market(tok.rsplit(":", 1)[0])
+            return m.tick_size if m else 0.01
+        if mode == "live":
+            from .trading.us_broker import UsLiveBroker
+            creds = self.cfg["_live_confirmed"]
+            broker = UsLiveBroker(creds["key_id"], creds["secret_key"], fee_for,
+                                  base=self.cfg.get("polymarket_us", {}).get("api_url", "https://api.polymarket.us"),
+                                  tick_for=tick_for)
+            log.warning("copytrade: LIVE - real orders on Polymarket US")
+        else:
+            broker = PaperBroker(ct.books.get, ct.books.trades_since, fee_for, ioc_non_post_only=True)
+        t = AutoTrader(self, self.cfg, broker, store, module=ct, exec_conf=cc, global_risk=self.global_risk,
+                       min_paper_trades=need)
         ct.attach(store, t)
         self.traders["copytrade"] = t
         await ct.start()
         await t.start()
+
+    def _running_modules(self) -> set:
+        return set(getattr(self, "traders", {}) or {})
+
+    async def _settle_leftovers_loop(self) -> None:
+        """LIVE positions of a module that is switched off (e.g. the old BTC strategy's last trades) have no
+        trader to settle them. Keep the books right: once Polymarket US settles the market, close the record
+        with the official payout. Without this the reconciler would see 'bot holds X, exchange shows none'
+        after the market expires and halt all trading. Nothing is ever bought or sold here."""
+        while True:
+            try:
+                await self.settle_leftovers()
+            except Exception as e:  # noqa: BLE001
+                log.warning("leftover settlement check: %r", e)
+            await asyncio.sleep(120)
+
+    async def settle_leftovers(self, now: float | None = None) -> list[int]:
+        if self.trade_mode != "live" or self.copytrade is None:
+            return []
+        running = self._running_modules()
+        rows = self.db.query("SELECT * FROM bot_positions WHERE mode='live' AND COALESCE(venue,'polymarket_intl')=? "
+                             "AND status IN ('open','resolving')", (self.venue,))
+        done = []
+        for p in rows:
+            mod = p.get("module") or "crypto_updown"
+            if mod in running or mod == "test_order":
+                continue
+            v = self.copytrade.settled.get(p["slug"])
+            if v is None:
+                v = await self.copytrade.refresh_settlement(p["slug"])
+            if v is None:
+                continue
+            per = v if str(p["token"]).endswith(":long") else 1.0 - v
+            left = (p["shares"] or 0) - (p["exit_shares"] or 0)
+            payout = left * per
+            basis = (p["cost"] or 0) + (p["entry_fee"] or 0)
+            pnl = (p["exit_proceeds"] or 0) - (p["exit_fee"] or 0) + payout - basis
+            self.db.execute("UPDATE bot_positions SET status='closed', payout=?, pnl=?, won=?, closed_ts=?, "
+                            "exit_reason=COALESCE(exit_reason || '; then ', '') || ? WHERE id=?",
+                            (payout, pnl, int(pnl > 0), now or time.time(),
+                             f"settled at {per:.2f}/share (module {mod} is switched off)", p["id"]))
+            self.trade_store.event("resolve", f"{mod} position {p['id']} {p['slug']} settled at {per:.2f}/share "
+                                   f"after its module was switched off: P&L {pnl:+.2f}", position=p["id"])
+            self.alert("fill", f"Settled leftover {mod} position", f"{p['slug']}: P&L {pnl:+.2f}", "info")
+            done.append(p["id"])
+        return done
 
     async def kill_all(self, reason: str) -> int:
         n = 0

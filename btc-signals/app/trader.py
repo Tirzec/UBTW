@@ -197,8 +197,11 @@ def main(argv=None) -> None:
             mods.append(("crypto", ("live:" if live else "") + "risk"))
         if (cfg.get("sports", {}) or {}).get("enabled"):
             mods.append(("sports", ("live:" if live else "") + "risk:sports"))
-        if (cfg.get("copytrade", {}) or {}).get("enabled"):
-            mods.append(("copy trading (PAPER)", "risk:copytrade"))
+        cc = cfg.get("copytrade", {}) or {}
+        if cc.get("enabled"):
+            cl = live and str(cc.get("mode", "paper")) == "live"
+            mods.append(("copy trading (LIVE - real money)" if cl else "copy trading (PAPER)",
+                         ("live:" if cl else "") + "risk:copytrade"))
         print("mode:", (cfg.get("trading", {}) or {}).get("mode", "paper"))
         ks = c.execute("SELECT value FROM bot_state WHERE key='kill_requested'").fetchone()
         if ks and json.loads(ks["value"] or "null"):
@@ -209,7 +212,7 @@ def main(argv=None) -> None:
             state = f"HALTED: {r.get('halt_reason')}" if r.get("halted") else "running"
             print(f"{label}: {state} | today P&L {r.get('day_pnl', 0):+.2f} over {r.get('day_trades', 0)} trades | "
                   f"losses in a row {r.get('consecutive_losses', 0)}")
-            if key == "risk:copytrade":
+            if key.endswith("risk:copytrade"):
                 for k2, title in (("copy:paused", "paused traders"), ("copy:rescore", "weekly re-score")):
                     row = c.execute("SELECT value FROM bot_state WHERE key=?", (k2,)).fetchone()
                     for w, v in (json.loads(row["value"]) if row else {}).items():

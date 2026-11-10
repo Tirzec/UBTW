@@ -223,10 +223,11 @@ def test_exit_decision_carries_partial_size():
     assert ExitDecision("SELL", "x").shares is None
 
 
-def test_config_is_paper_copy_only_with_predictions_archived():
+def test_config_is_live_copy_trading_with_predictions_archived():
     import yaml
     c = yaml.safe_load(open("config.yaml", encoding="utf-8"))
-    assert c["trading"]["mode"] == "paper" and c["copytrade"]["mode"] == "paper"
+    assert c["trading"]["mode"] == "live" and c["copytrade"]["mode"] == "live"   # user's choice 2026-11-10
+    assert c["trading"]["live_phase"] == 1                                     # $1 hard cap per trade
     assert c["modules"]["crypto_updown"]["enabled"] is False and c["sports"]["enabled"] is False
     assert c["predictions"]["enabled"] is False
     r = c["copytrade"]["risk"]

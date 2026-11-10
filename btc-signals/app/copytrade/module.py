@@ -2,7 +2,7 @@
 
 Signal source (read-only): the traders' public fills on international Polymarket (Data API v2).
 Orders: ONLY on Polymarket US, through the shared AutoTrader (same order lifecycle, kill switch, risk limits,
-audit log, paper/live broker as before). This build is PAPER ONLY.
+audit log, paper/live broker as before). LIVE only after the live checks and copytrade.mode: live.
 
 Copy rules (copytrade: in config.yaml):
   BUY  - only if the market exists on Polymarket US with the same question/line/side (strict matchers),
@@ -130,6 +130,10 @@ class CopyTradeModule(StrategyModule):
         self.store = store
         self.trader = trader
 
+    @property
+    def mode(self) -> str:
+        return getattr(self.trader, "mode", None) or getattr(self.store, "mode", None) or "paper"
+
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
         self.keep = {str(k): float(v) for k, v in (self.store.get_state("copy:keep") or {}).items()}
@@ -152,7 +156,8 @@ class CopyTradeModule(StrategyModule):
         for name, coro in (("copy-leaders", self.watcher.run(self.on_trade)), ("copy-books", self._books_loop()),
                            ("copy-review", self._review_loop())):
             self._tasks.append(asyncio.create_task(g(name, coro), name=name))
-        log.warning("copytrade (PAPER) watching %s", ", ".join(t.get("name") or t["wallet"] for t in self.traders))
+        log.warning("copytrade (%s) watching %s", self.mode.upper(),
+                    ", ".join(t.get("name") or t["wallet"] for t in self.traders))
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -622,7 +627,7 @@ class CopyTradeModule(StrategyModule):
                         "value": (bid * (p["shares"] - (p["exit_shares"] or 0))) if bid is not None and p["shares"]
                         else None, "cost": p["cost"]})
         lags = sorted(self.watcher.lags)
-        return {"mode": "paper", "traders": traders, "positions": pos, "decisions": list(self.decisions)[:60],
+        return {"mode": self.mode, "traders": traders, "positions": pos, "decisions": list(self.decisions)[:60],
                 "feed_lag_s": lags[len(lags) // 2] if lags else None,
                 "rules": {k: self.cc.get(k) for k in ("stake_usd", "max_worse", "max_per_market_usd",
                                                       "min_time_to_resolution_s", "pause_after_trades")},

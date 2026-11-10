@@ -415,8 +415,12 @@ function renderCopy(m) {
       : s < 172800 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " days ago";
   };
   const rules = st.rules || {};
-  $("cp-mode").textContent = "PAPER";
-  $("cp-status").textContent = `Copies $${rules.stake_usd ?? 1} per trade onto Polymarket US (simulated fills on the real US order book). ` +
+  const live = (st.mode || "paper") === "live";
+  $("cp-mode").textContent = live ? "LIVE - REAL MONEY" : "PAPER";
+  $("cp-mode").style.background = live ? "#c0392b" : "";
+  $("cp-mode").style.color = live ? "#fff" : "";
+  $("cp-status").textContent = `Copies $${rules.stake_usd ?? 1} per trade onto Polymarket US ` +
+    (live ? "with REAL orders. " : "(simulated fills on the real US order book). ") +
     `Feed lag ${st.feed_lag_s == null ? "–" : Math.round(st.feed_lag_s) + " s"} (their trade -> seen here).` +
     (r.halted ? ` · HALTED: ${r.halt_reason}` : "") + (m.status_note ? ` · ${m.status_note}` : "");
   const open = (st.positions || []).reduce((s, p) => s + (p.cost || 0), 0);

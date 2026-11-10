@@ -1,9 +1,9 @@
 """First live phase: hard limits that config can LOWER but never raise.
 
 While `trading.live_phase` is 1 (the only phase that exists so far), LIVE trading is capped at:
-  - stake per trade         <= $1 (and config's own max_stake_usd if lower)
+  - stake per trade         <= $1 (and config's own max_stake_usd if lower), copy trading included
   - daily loss, all modules <= $10 (and config's own limits if lower)
-  - live entries per day    <= 10, across crypto + sports, unless live_phase1.max_trades_per_day is
+  - live entries per day    <= 10, across every module, unless live_phase1.max_trades_per_day is
                                set to off (user's choice 2026-11-10); it can never be raised above 10
 These numbers are in code on purpose: raising them means changing this file, not a setting.
 """
@@ -26,8 +26,9 @@ def apply_phase1(cfg: dict) -> dict:
     """Clamp every live risk limit in cfg to phase-1 values (in place). Returns what is in force."""
     tc = cfg.setdefault("trading", {})
     sc = cfg.setdefault("sports", {})
+    cc = cfg.setdefault("copytrade", {})
     rg = cfg.setdefault("risk_global", {})
-    for conf in (tc.setdefault("risk", {}), sc.setdefault("risk", {})):
+    for conf in (tc.setdefault("risk", {}), sc.setdefault("risk", {}), cc.setdefault("risk", {})):
         if conf.get("max_stake_usd", PHASE1_MAX_STAKE_USD) in OFF:
             conf["max_stake_usd"] = "off"               # stake set as a % of balance by the user
         else:
@@ -37,9 +38,11 @@ def apply_phase1(cfg: dict) -> dict:
         else:
             conf["daily_loss_limit_usd"] = min(float(conf.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD)),
                                                PHASE1_MAX_DAILY_LOSS_USD)
-    for entry in (tc.setdefault("entry", {}), sc.setdefault("entry", {})):
+    for entry in (tc.setdefault("entry", {}), sc.setdefault("entry", {}), cc.setdefault("entry", {})):
         if entry.get("stake_usd") not in OFF:
             entry["stake_usd"] = min(float(entry.get("stake_usd", PHASE1_MAX_STAKE_USD)), PHASE1_MAX_STAKE_USD)
+    if cc.get("stake_usd") not in OFF and cc.get("stake_usd") is not None:
+        cc["stake_usd"] = min(float(cc["stake_usd"]), PHASE1_MAX_STAKE_USD)     # $ per copy
     if rg.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD) in OFF:
         rg["daily_loss_limit_usd"] = "off"
     else:

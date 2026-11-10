@@ -158,8 +158,8 @@ paper:                              # signal log: every signal as a $50 hypothet
 # ---------------------------------------------------------------------------
 trading:
   enabled: true
-  mode: paper                      # 2026-11-10: bot reworked into a COPY-TRADING bot, paper first (was live: fair-value crypto)
-  live_trading_enabled: false      # second, explicit switch for live (was true for the crypto strategy)
+  mode: live                       # 2026-11-10: user asked for REAL-MONEY copy trading (crypto strategy is off)
+  live_trading_enabled: true       # second, explicit switch for live; the typed confirmation is still required
   min_paper_trades_for_live: 0     # was 300; waived by the user on 2026-11-09 (crypto only, phase-1 caps)
   paper_count_from: "2026-11-09T23:52:00Z"   # new fair-value strategy: only its paper trades count
   live_phase: 1                    # first live phase: hard caps in app/trading/live_phase.py
@@ -270,13 +270,15 @@ predictions:
 # ---------------------------------------------------------------------------
 # COPY TRADING (2026-11-10). Watches the approved traders on international Polymarket (public data,
 # read-only; the user accepted that reading it from the US conflicts with polymarket.com's terms) and copies
-# their trades onto POLYMARKET US ONLY. PAPER ONLY in this build: no real orders whatever trading.mode says.
+# their trades onto POLYMARKET US ONLY. LIVE (real money) needs ALL of: trading.mode live + the typed
+# confirmation at startup, copytrade.mode: live, and min_paper_trades_for_live closed paper copies.
 # Kill switch / STOP button / stop-bot.bat, logging and Windows sleep protection work exactly as before.
 # ---------------------------------------------------------------------------
 copytrade:
   enabled: true
-  mode: paper
-  traders:                         # approved by the user 2026-11-10 for PAPER copying (audit verdict: weak)
+  mode: live                       # user's choice 2026-11-10: copy with REAL money (phase-1 caps apply)
+  min_paper_trades_for_live: 0     # paper-copy requirement WAIVED by the user 2026-11-10 (0 paper copies done)
+  traders:                         # approved by the user 2026-11-10 (audit verdict: weak / inconclusive)
     - {name: ArielFilipino, wallet: "0xe18ecc345e00ee7c4f2d1f676f3dd2acb112f826"}   # NFL/CFB/NBA spreads, totals
     - {name: rigatohni, wallet: "0x12e45413131aedc46b68a127354831300485dfc2"}       # US election markets
   poll_interval_s: 3               # how often each trader's new fills are read
