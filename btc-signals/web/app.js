@@ -304,7 +304,11 @@ function renderFair(b) {
       : `${bst.side}: edge ${signed(bst.edge, 3)}, needs ${signed(r.need, 3)} (${signed(gap * 100, 1)} pts short)`;
     return `<tr><td>${esc(d)}</td><td>${when}</td><td>${status}</td></tr>`;
   }).join("");
-  const readyHtml = rd ? `<h3>When can it trade?</h3><div class="table-wrap"><table><tr><th>Market</th><th>Entries open</th><th>Closest to a trade right now</th></tr>${rd}</table></div>
+  const rk = b.risk || {};
+  const stopHtml = rk.halted ? `<p class="bot-state halted">NOT TRADING - halted: ${esc(rk.halt_reason)}. Every signal is skipped until you press <b>Resume trading</b> (or run windows\\resume.bat).</p>`
+    : rk.day_stopped ? `<p class="bot-state paused">NOT TRADING - stopped for today (${rk.day_stop_reason === "streak" ? "losses in a row" : "daily loss limit"}); resumes after midnight.</p>`
+    : (b.status_note || "").includes("skipped") ? `<p class="bot-state paused">Last signal skipped: ${esc(b.status_note)}</p>` : "";
+  const readyHtml = rd ? stopHtml + `<h3>When can it trade?</h3><div class="table-wrap"><table><tr><th>Market</th><th>Entries open</th><th>Closest to a trade right now</th></tr>${rd}</table></div>
      <p class="muted">It buys only when the edge (fair value − ask − fee) reaches the needed level. Every new window resets this; most windows never reach it.</p>` : "";
   el.innerHTML = probs + readyHtml + stats + (fair ? `<div class="table-wrap"><table><tr><th>Window</th><th class="num">Fair P(UP)</th><th class="num">Left</th><th class="num">Locked</th><th class="num">Vol /√s</th></tr>${fair}</table></div>` : "")
     + "<h3>Calibration</h3>" + calHtml

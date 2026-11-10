@@ -229,7 +229,10 @@ class AutoTrader:
                     self.risk.state.maintenance_until = now + m.retry_after
                 except BrokerError as e:
                     self._api_error(f"position {p['id']}", e)
-        for sig in self.module.signals(now):
+        sigs = self.module.signals(now)
+        if not sigs:
+            self.status_note = ""
+        for sig in sigs:
             try:
                 await self._maybe_enter(sig, now)
             except Maintenance as m:
