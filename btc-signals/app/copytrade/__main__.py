@@ -346,12 +346,21 @@ def main(argv=None) -> None:
         store = TradeStore(DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db"))), "paper",
                            cfg.get("venue", "polymarket_us"), "copytrade")
         paused = dict(store.get_state("copy:paused") or {})
+        base = dict(store.get_state("copy:unpaused") or {})
         names = {(t.get("name") or "").lower(): t["wallet"] for t in load_traders(cfg)}
+        rows = store.db.query("SELECT copy_leader, pnl FROM bot_positions WHERE mode='paper' AND module='copytrade' "
+                              "AND status='closed' AND copy_leader IS NOT NULL")
         for w in a.wallets:
             wal = names.get(w.lower(), w.lower())
-            print(f"{w}: " + ("copying again (takes effect within a minute)" if paused.pop(wal, None)
-                              else "was not paused"))
+            if paused.pop(wal, None):
+                mine = [r for r in rows if r["copy_leader"] == wal]
+                base[wal] = {"closed": len(mine), "pnl": sum(r["pnl"] or 0 for r in mine), "ts": time.time()}
+                print(f"{w}: copying again (takes effect within a minute; the next "
+                      f"{int((cfg.get('copytrade', {}) or {}).get('pause_after_trades', 30))} copies are judged afresh)")
+            else:
+                print(f"{w}: was not paused")
         store.set_state("copy:paused", paused)
+        store.set_state("copy:unpaused", base)
     else:
         cur = json.loads(APPROVED.read_text()) if APPROVED.exists() else {"traders": []}
         for t in cur["traders"]:

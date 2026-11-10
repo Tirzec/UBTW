@@ -135,10 +135,18 @@ class LeaderWatcher:
 
     async def _sell_fraction(self, t: LeaderTrade) -> None:
         """Fraction of their holding this sell was: sold / (sold + what they still hold)."""
+        last_fill = max(float(r.get("timestamp") or 0) for r in t.raw) if t.raw else t.first_ts
         try:
-            d = await self._get("positions", {"user": t.wallet, "condition": t.condition_id, "limit": 50})
-            left = sum(float(r.get("current_size") or 0) for r in d.get("data") or []
-                       if str(r.get("token_id")) == t.token_id)
+            for attempt in range(3):
+                d = await self._get("positions", {"user": t.wallet, "condition": t.condition_id, "limit": 50})
+                rows = [r for r in d.get("data") or [] if str(r.get("token_id")) == t.token_id]
+                left = sum(float(r.get("current_size") or 0) for r in rows)
+                fresh = not rows or max(float(r.get("last_event_at") or 0) for r in rows) >= last_fill
+                if fresh:
+                    break
+                await asyncio.sleep(1.0)
+            if not fresh:                       # positions not updated for this sale yet: it still counts the
+                left = max(0.0, left - t.size)  # shares just sold, so take them off
             t.holding_after = left
             t.sell_fraction = min(1.0, t.size / (t.size + left)) if t.size + left > 0 else 1.0
         except (httpx.HTTPError, ValueError) as e:
@@ -153,7 +161,7 @@ class LeaderWatcher:
                     for t in await self.poll(w):
                         await on_trade(t)
                     self.errors.pop(w, None)
-                except (httpx.HTTPError, ValueError) as e:
+                except Exception as e:  # noqa: BLE001 - keep watching every trader whatever happens
                     self.errors[w] = f"{type(e).__name__}: {e}"[:200]
                     log.warning("leader poll %s: %s", w[:10], e)
             await asyncio.sleep(self.interval_s)

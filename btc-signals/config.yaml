@@ -289,6 +289,7 @@ copytrade:
   min_time_to_resolution_s: 3600   # don't copy markets that resolve in under 1 hour
   max_signal_age_s: 300            # their trade must be seen within 5 min (data feed lag)
   opposite_side_window_s: 604800   # skip if another approved trader bought the other side within 7 days
+  same_entry_window_s: 1800        # their fills of one entry within 30 min (or while our copy is open) = one copy
   politics_min_confidence: 0.95    # strict election-market matcher: below this, not copied
   pause_after_trades: 30           # auto-pause a trader whose copies lost money after 30 closed copies
   rescore_every_days: 7            # weekly re-score of each trader (alert if their last 30 days lost money)

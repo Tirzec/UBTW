@@ -39,6 +39,9 @@ from .leaders import LeaderTrade, LeaderWatcher
 log = logging.getLogger("copytrade")
 GAMMA = "https://gamma-api.polymarket.com"
 GAME_HOURS = {"nfl": 3.5, "cfb": 4.0, "nba": 2.75, "cbb": 2.5, "nhl": 3.0, "mlb": 3.5, "wnba": 2.5}
+# shortest normal game length: the "< 1 h to resolution" rule must never let a late in-game copy through
+MIN_GAME_HOURS = {"nfl": 3.0, "cfb": 3.2, "nba": 2.1, "cbb": 1.9, "nhl": 2.4, "mlb": 2.5, "wnba": 1.9}
+SETTLE_CHECK_S = 120
 
 
 def load_traders(cfg: dict) -> list[dict]:
@@ -103,7 +106,11 @@ class CopyTradeModule(StrategyModule):
         self.us_markets: dict[str, dict] = {}       # slug -> US market JSON
         self.meta: dict[str, dict] = {}             # slug -> {"resolve_ts", "start_ts", "league", "label"}
         self.pending: list[Signal] = []
-        self.sell_targets: dict[int, dict] = {}     # position id -> {"target", "ts", "why"}
+        self.sell_targets: dict[int, dict] = {}     # position id -> {"ts", "why"} (a copied sale is due)
+        self.keep: dict[str, float] = {}            # position id -> share of the copy to keep (leader sells)
+        self.last_copy: dict[tuple, float] = {}     # (wallet, intl token) -> when we last copied/queued a BUY
+        self._last_market_try: dict[str, float] = {}
+        self._last_settle_check: dict[str, float] = {}
         self.decisions: deque = deque(maxlen=200)
         self.sides_seen: dict[str, dict] = {}       # us slug -> {leg: {wallet: ts}}
         self.settled: dict[str, float] = {}
@@ -124,7 +131,13 @@ class CopyTradeModule(StrategyModule):
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
+        self.keep = {str(k): float(v) for k, v in (self.store.get_state("copy:keep") or {}).items()}
         for p in self.store.active_positions():          # positions recovered after a restart
+            if p.get("copy_leader") and p.get("copy_src_token"):
+                k = (p["copy_leader"], p["copy_src_token"])
+                self.last_copy[k] = max(self.last_copy.get(k, 0), p.get("opened_ts") or 0)
+            if self.keep.get(str(p["id"]), 1.0) < 1.0:
+                self.sell_targets[p["id"]] = {"ts": time.time(), "why": "copied sale (resumed after restart)"}
             try:
                 await self._load_market(p["slug"])
             except Exception as e:  # noqa: BLE001
@@ -166,7 +179,12 @@ class CopyTradeModule(StrategyModule):
         r = await self.client.get(GAMMA + path, params=params)
         r.raise_for_status()
         d = r.json() or []
-        self._gamma_cache[k] = (time.time(), d)
+        now = time.time()
+        self._gamma_cache = {kk: v for kk, v in self._gamma_cache.items() if now - v[0] < ttl}
+        if len(self._gamma_cache) >= 200:
+            for kk, _ in sorted(self._gamma_cache.items(), key=lambda kv: kv[1][0])[:50]:
+                self._gamma_cache.pop(kk, None)
+        self._gamma_cache[k] = (now, d)
         return d
 
     async def _gw_event(self, path: str) -> Optional[dict]:
@@ -176,8 +194,8 @@ class CopyTradeModule(StrategyModule):
             return hit[1]
         d = await self._gw(path)
         self._us_event_cache[path] = (time.time(), d)
-        if len(self._us_event_cache) > 60:
-            for k, _ in sorted(self._us_event_cache.items(), key=lambda kv: kv[1][0])[:20]:
+        if len(self._us_event_cache) > 20:
+            for k, _ in sorted(self._us_event_cache.items(), key=lambda kv: kv[1][0])[:8]:
                 self._us_event_cache.pop(k, None)
         return d
 
@@ -218,6 +236,9 @@ class CopyTradeModule(StrategyModule):
                 self._copy_sell(t)
         except httpx.HTTPError as e:
             self._decide(t, "skip", f"data error: {type(e).__name__}")
+        except Exception as e:  # noqa: BLE001 - one odd trade must never stop copying the others
+            log.exception("copytrade: trade %s %s", t.name, t.slug)
+            self._decide(t, "skip", f"internal error: {type(e).__name__}: {e}"[:200])
 
     async def _map(self, t: LeaderTrade) -> tuple[Optional[dict], str]:
         """Intl trade -> US market/side, or (None, reason)."""
@@ -236,7 +257,10 @@ class CopyTradeModule(StrategyModule):
             except match_sports.NoMatch as e:
                 return None, str(e)
             lg = match_sports.league_of(t.slug)
-            r["resolve_ts"] = (r["start_ts"] or time.time()) + GAME_HOURS.get(lg, 3.0) * 3600
+            if r["start_ts"] is None:
+                return None, "game start time unknown"
+            r["resolve_ts"] = r["start_ts"] + GAME_HOURS.get(lg, 3.0) * 3600          # hold/settle timing
+            r["earliest_end_ts"] = r["start_ts"] + MIN_GAME_HOURS.get(lg, 1.9) * 3600  # for the 1 h rule
             r["league"] = lg
             return r, ""
         if time.time() - self._pol_index_ts > float(self.cc.get("politics_index_refresh_s", 900)) \
@@ -249,6 +273,7 @@ class CopyTradeModule(StrategyModule):
         if r["confidence"] < float(self.cc.get("politics_min_confidence", 0.95)):
             return None, f"politics match only {r['confidence']:.2f} sure ({'; '.join(r['notes'])})"
         r["resolve_ts"] = r.get("end_ts")
+        r["earliest_end_ts"] = r.get("end_ts")
         r["league"] = "politics"
         r["start_ts"] = None
         return r, ""
@@ -259,6 +284,13 @@ class CopyTradeModule(StrategyModule):
             return self._decide(t, "skip", f"trader paused: {self.paused()[t.wallet]}")
         if t.lag_s > float(cc.get("max_signal_age_s", 300)):
             return self._decide(t, "skip", f"seen {t.lag_s:.0f} s after their trade (too late)")
+        key = (t.wallet, t.token_id)
+        same = float(cc.get("same_entry_window_s", 1800))
+        if now - self.last_copy.get(key, 0) < same or any(
+                p.get("copy_leader") == t.wallet and p.get("copy_src_token") == t.token_id
+                and p["status"] in ("opening", "open", "closing") for p in self.store.active_positions()):
+            return self._decide(t, "ignore", "more fills of an entry we already copied (one $1 copy per entry)")
+        self.last_copy[key] = now
         r, why = await self._map(t)
         if r is None:
             return self._decide(t, "skip", f"not copyable on Polymarket US: {why}")
@@ -276,8 +308,8 @@ class CopyTradeModule(StrategyModule):
         res_ts = r.get("resolve_ts")
         if res_ts is None:
             return self._decide(t, "skip", "resolution time unknown", token=token)
-        if res_ts - now < float(cc.get("min_time_to_resolution_s", 3600)):
-            return self._decide(t, "skip", "market resolves in under 1 hour", token=token)
+        if (r.get("earliest_end_ts") or res_ts) - now < float(cc.get("min_time_to_resolution_s", 3600)):
+            return self._decide(t, "skip", "market may resolve in under 1 hour", token=token)
         stake = float(cc.get("stake_usd", 1.0))
         held = sum(((p["cost"] or 0) + (p["entry_fee"] or 0)) if p["status"] != "opening" else stake
                    for p in self.store.active_positions() if p["slug"] == slug)
@@ -311,21 +343,35 @@ class CopyTradeModule(StrategyModule):
                      us_ask=ask)
 
     def _copy_sell(self, t: LeaderTrade) -> None:
+        """Keep the same share of each copy as the trader keeps: keep *= (1 - fraction sold). Covers copies
+        still queued, whose buy order is resting, being sold, or open; a copied sale that is still waiting
+        compounds correctly (50% then 50% of the rest = keep 25%)."""
         mine = [p for p in self.store.active_positions()
                 if p.get("copy_leader") == t.wallet and p.get("copy_src_token") == t.token_id
-                and p["status"] == "open"]
-        if not mine:
+                and p["status"] in ("opening", "open", "closing")]
+        queued = [s for s in self.pending if (s.extra or {}).get("position_fields", {}).get("copy_leader") == t.wallet
+                  and s.extra["position_fields"].get("copy_src_token") == t.token_id]
+        if not mine and not queued:
             return self._decide(t, "ignore", "sell in a market we did not copy")
         if t.sell_fraction is None:
             return self._decide(t, "hold", "could not read how much they still hold: keeping our copy")
+        frac = 1.0 if t.sell_fraction >= 0.98 else max(0.0, t.sell_fraction)
+        why = f"{t.name} sold {t.sell_fraction:.0%} of their position"
         for p in mine:
-            held = p["shares"] - (p["exit_shares"] or 0)
-            frac = 1.0 if t.sell_fraction >= 0.98 else t.sell_fraction
-            prev = self.sell_targets.get(p["id"], {}).get("target", p["exit_shares"] or 0)
-            target = min(p["shares"], prev + held * frac)
-            self.sell_targets[p["id"]] = {"target": target, "ts": time.time(),
-                                          "why": f"{t.name} sold {t.sell_fraction:.0%} of their position"}
-        self._decide(t, "sell", f"selling {t.sell_fraction:.0%} of our {len(mine)} copy(ies)")
+            k = str(p["id"])
+            self.keep[k] = self.keep.get(k, 1.0) * (1.0 - frac)
+            self.sell_targets[p["id"]] = {"ts": time.time(), "why": why}
+        for s in queued:
+            s.extra["keep"] = s.extra.get("keep", 1.0) * (1.0 - frac)
+            if s.extra["keep"] <= 0.02:                  # they already got out: don't buy at all
+                self.pending.remove(s)
+        self._save_keep()
+        self._decide(t, "sell", f"selling {t.sell_fraction:.0%} of our {len(mine) + len(queued)} copy(ies)")
+
+    def _save_keep(self) -> None:
+        live = {str(p["id"]) for p in self.store.active_positions()}
+        self.keep = {k: v for k, v in self.keep.items() if k in live}
+        self.store.set_state("copy:keep", self.keep)
 
     # ------------------------------------------------------------ AutoTrader hooks
     def signals(self, now: float) -> list[Signal]:
@@ -340,16 +386,24 @@ class CopyTradeModule(StrategyModule):
         self._decide((sig.extra or {}).get("_trade"), "skip", f"risk: {reason}", token=sig.token)
 
     def on_entered(self, sig: Signal, pid: int, order) -> None:
+        if (sig.extra or {}).get("keep", 1.0) < 1.0:
+            self.keep[str(pid)] = sig.extra["keep"]
+            self.sell_targets[pid] = {"ts": time.time(), "why": "trader sold before our copy filled"}
+            self._save_keep()
         self._decide((sig.extra or {}).get("_trade"), "order", f"BUY order {order.status} "
                      f"(filled {order.filled:.2f} of {order.size:.2f} @ <= {order.price:.3f})", token=sig.token,
                      position=pid)
 
     def market(self, slug: str) -> Optional[MarketInfo]:
+        meta = self.meta.get(slug, {})
         m = self.us_markets.get(slug)
         if not m:
-            return None
-        meta = self.meta.get(slug, {})
+            if not meta.get("resolve_ts"):
+                return None
+            m = {}                                    # not loaded yet (retried in the books loop): safe defaults
         res = meta.get("resolve_ts")
+        if res and (slug in self.settled or m.get("status") == "MARKET_STATUS_RESOLVED"):
+            res = min(res, time.time())               # resolved early: go straight to settlement
         min_size = float(m.get("minimumTradeQty") or 0.01)
         return MarketInfo(slug=slug, tick_size=float(m.get("orderPriceMinTickSize") or 0.01), min_size=min_size,
                           size_step=1.0 if min_size >= 1 else 0.01,
@@ -369,7 +423,8 @@ class CopyTradeModule(StrategyModule):
         req = self.sell_targets.get(p["id"])
         if not req:
             return ExitDecision("HOLD", "holding until the trader sells or the market resolves", "copy_hold")
-        left = req["target"] - (p["exit_shares"] or 0)
+        target = p["shares"] * (1.0 - self.keep.get(str(p["id"]), 1.0))
+        left = target - (p["exit_shares"] or 0)
         if left <= 0.0099:
             self.sell_targets.pop(p["id"], None)
             return ExitDecision("HOLD", "copied sale done", "copy_hold")
@@ -420,10 +475,17 @@ class CopyTradeModule(StrategyModule):
         """Keep the books of markets we hold fresh (exit valuation, paper fills, copied sells)."""
         while True:
             slugs = {p["slug"] for p in self.store.active_positions()} | {s.market_id for s in self.pending}
+            now = time.time()
             for slug in slugs:
                 try:
+                    if slug not in self.us_markets and now - self._last_market_try.get(slug, 0) > 60:
+                        self._last_market_try[slug] = now
+                        await self._load_market(slug)
                     await self._load_book(slug)
-                except httpx.HTTPError as e:
+                    if slug not in self.settled and now - self._last_settle_check.get(slug, 0) > SETTLE_CHECK_S:
+                        self._last_settle_check[slug] = now
+                        await self.refresh_settlement(slug)      # catches markets that resolve early
+                except Exception as e:  # noqa: BLE001 - never let one market stop the loop
                     log.warning("copytrade book %s: %s", slug, e)
             await asyncio.sleep(float(self.cc.get("book_poll_s", 2)))
 
@@ -450,10 +512,13 @@ class CopyTradeModule(StrategyModule):
     def _check_auto_pause(self) -> None:
         n_after = int(self.cc.get("pause_after_trades", 30))
         paused = dict(self.paused())
+        base = self.store.get_state("copy:unpaused") or {}      # set by `unpause`: judge only later copies
         for w, s in self.trader_stats().items():
-            if w not in paused and s["closed"] >= n_after and s["pnl"] < 0:
+            b = base.get(w) or {}
+            closed, pnl = s["closed"] - int(b.get("closed", 0)), s["pnl"] - float(b.get("pnl", 0.0))
+            if w not in paused and closed >= n_after and pnl < 0:
                 name = next((t.get("name") for t in self.traders if t["wallet"] == w), w[:10])
-                paused[w] = f"copies lost ${-s['pnl']:.2f} over {s['closed']} closed trades"
+                paused[w] = f"copies lost ${-pnl:.2f} over {closed} closed trades"
                 self.store.set_state("copy:paused", paused)
                 self.store.event("risk", f"copying {name} PAUSED: {paused[w]}", "WARNING")
                 self.engine.alert("risk", f"Copy trading: {name} paused", paused[w] +
@@ -465,6 +530,16 @@ class CopyTradeModule(StrategyModule):
         while True:
             try:
                 self._check_auto_pause()
+                now = time.time()                     # forget old opposite-side / same-entry records
+                hz = float(self.cc.get("opposite_side_window_s", 7 * 86400))
+                for slug in list(self.sides_seen):
+                    for leg in ("long", "short"):
+                        self.sides_seen[slug][leg] = {w: ts for w, ts in self.sides_seen[slug][leg].items()
+                                                      if now - ts < hz}
+                    if not any(self.sides_seen[slug].values()):
+                        del self.sides_seen[slug]
+                self.last_copy = {k: v for k, v in self.last_copy.items()
+                                  if now - v < float(self.cc.get("same_entry_window_s", 1800))}
                 last = float(self.store.get_state("copy:last_rescore") or 0)
                 if time.time() - last > float(self.cc.get("rescore_every_days", 7)) * 86400:
                     self.store.set_state("copy:last_rescore", time.time())

@@ -233,3 +233,100 @@ def test_config_is_paper_copy_only_with_predictions_archived():
     assert r["max_total_exposure_usd"] == 10 and r["max_consecutive_losses"] == 5
     assert c["copytrade"]["stake_usd"] == 1.0 and c["copytrade"]["max_per_market_usd"] == 3
     assert {t["name"] for t in c["copytrade"]["traders"]} == {"ArielFilipino", "rigatohni"}
+
+
+# ------------------------------------------------------------------ review fixes
+def _sell(name_frac, token="TOK"):
+    from app.copytrade.leaders import LeaderTrade
+    return LeaderTrade(wallet="0xaa", name="T", side="SELL", token_id=token, condition_id="c", slug="x",
+                       event_slug="e", title="t", outcome="Yes", outcome_index=0, size=50, price=0.6,
+                       first_ts=time.time(), seen_ts=time.time(), sell_fraction=name_frac)
+
+
+def test_successive_sells_compound_while_first_sale_waits():
+    p = {"id": 1, "status": "open", "shares": 10.0, "exit_shares": 0.0, "copy_leader": "0xaa",
+         "copy_src_token": "TOK", "slug": "s", "token": "s:long"}
+    m = _module(_Store([p]))
+    m._copy_sell(_sell(0.5))
+    m._copy_sell(_sell(0.5))                                   # 50% of what they had left
+    d = m.exit_decision(p, _Val(), time.time())
+    assert d.shares == pytest.approx(7.5)                      # keep 25%, not sell everything
+
+
+def test_sell_reaches_resting_and_queued_copies():
+    p = {"id": 2, "status": "opening", "shares": 0.0, "exit_shares": 0.0, "copy_leader": "0xaa",
+         "copy_src_token": "TOK", "slug": "s", "token": "s:long"}
+    st = _Store([p])
+    m = _module(st)
+    from app.modules.base import Signal
+    q = Signal(module="copytrade", market_id="s", token="s:long", side="x", fair_prob=0.5, confidence=1, edge=0,
+               extra={"position_fields": {"copy_leader": "0xaa", "copy_src_token": "TOK"}})
+    m.pending.append(q)
+    m._copy_sell(_sell(0.5))
+    assert m.keep["2"] == pytest.approx(0.5) and q.extra["keep"] == pytest.approx(0.5) and q in m.pending
+    m._copy_sell(_sell(1.0))                                   # they are out: queued copy is dropped
+    assert q not in m.pending and m.keep["2"] == 0.0
+    p.update(status="open", shares=4.0)                        # resting order filled 4 shares
+    assert m.exit_decision(p, _Val(), time.time()).shares == pytest.approx(4.0)
+
+
+def test_one_order_filled_over_several_polls_is_one_copy():
+    st = _Store()
+    m = _module(st)
+    from app.copytrade.leaders import LeaderTrade
+    calls = []
+
+    async def fake_map(t):
+        calls.append(t)
+        return None, "stop here"
+    m._map = fake_map
+    t = LeaderTrade(wallet="0xaa", name="T", side="BUY", token_id="TOK", condition_id="c", slug="x",
+                    event_slug="e", title="t", outcome="Yes", outcome_index=0, size=5, price=0.5,
+                    first_ts=time.time(), seen_ts=time.time())
+    asyncio.run(m._copy_buy(t))
+    asyncio.run(m._copy_buy(t))
+    assert len(calls) == 1 and m.decisions[0]["action"] == "ignore"
+
+
+def test_unpause_baseline_is_respected(monkeypatch):
+    st = _Store(state={"copy:unpaused": {"0xaa": {"closed": 30, "pnl": -2.0}}})
+    m = _module(st)
+    monkeypatch.setattr(m, "trader_stats", lambda: {"0xaa": {"closed": 35, "pnl": -2.5}})
+    m._check_auto_pause()
+    assert not st.state.get("copy:paused")                     # only 5 copies since the unpause
+    monkeypatch.setattr(m, "trader_stats", lambda: {"0xaa": {"closed": 60, "pnl": -2.5}})
+    m._check_auto_pause()
+    assert "0xaa" in st.state["copy:paused"]
+
+
+def test_market_fallback_and_early_settlement():
+    m = _module(_Store())
+    assert m.market("s") is None
+    m.meta["s"] = {"resolve_ts": time.time() + 86400}
+    mi = m.market("s")
+    assert mi is not None and mi.hold_phase_from > time.time() + 3600      # not loaded yet: safe defaults
+    m.settled["s"] = 1.0
+    assert m.market("s").hold_phase_from <= time.time()                     # resolved early: settle now
+
+
+def test_stale_positions_do_not_halve_a_full_exit():
+    from app.copytrade.leaders import LeaderWatcher
+    t = _sell(None)
+    t.raw = [{"timestamp": 1000}]
+
+    class W(LeaderWatcher):
+        async def _get(self, path, params):
+            return {"data": [{"token_id": "TOK", "current_size": 50, "last_event_at": 900}]}   # not updated
+
+    w = W(client=None, traders=[{"wallet": "0xaa", "name": "T"}])
+    import app.copytrade.leaders as L
+    real_sleep = L.asyncio.sleep
+
+    async def no_sleep(s):
+        return None
+    L.asyncio.sleep = no_sleep
+    try:
+        asyncio.run(w._sell_fraction(t))
+    finally:
+        L.asyncio.sleep = real_sleep
+    assert t.sell_fraction == 1.0                               # 50 sold, positions still showed them
