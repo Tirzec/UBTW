@@ -294,7 +294,19 @@ function renderFair(b) {
      <p class="muted">Calibration error ${cal.error == null ? "–" : pct(cal.error, 1)} over ${cal.n} settled trades.</p>`
      : '<p class="muted">Calibration chart appears once trades have settled.</p>';
   const arb = Object.entries(ms.arbitrage || {}).map(([d, a]) => `${d}: best UP+DOWN ask sum ${a.best_sum == null ? "–" : "$" + num(a.best_sum, 3)}, ${a.opportunities} opportunities in ${a.checks} checks`).join(" · ");
-  el.innerHTML = probs + stats + (fair ? `<div class="table-wrap"><table><tr><th>Window</th><th class="num">Fair P(UP)</th><th class="num">Left</th><th class="num">Locked</th><th class="num">Vol /√s</th></tr>${fair}</table></div>` : "")
+  const rd = Object.entries(ms.ready || {}).map(([d, r]) => {
+    const bst = r.best;
+    const when = (ms.warmup_left_s || 0) > 0 ? `after warm-up (${mmss(ms.warmup_left_s)})`
+      : r.opens_in_s > 0 ? `in ${mmss(r.opens_in_s)}` : r.closes_in_s > 0 ? "open now" : "closed (next window)";
+    const gap = bst ? bst.edge - r.need : null;
+    const status = !bst ? "no prices yet" : !bst.in_price_range ? `${bst.side} ask ${num(bst.ask)} outside 5–95¢`
+      : gap >= 0 ? `<b class="pos">signal: ${bst.side} edge ${signed(bst.edge, 3)}</b>`
+      : `${bst.side}: edge ${signed(bst.edge, 3)}, needs ${signed(r.need, 3)} (${signed(gap * 100, 1)} pts short)`;
+    return `<tr><td>${esc(d)}</td><td>${when}</td><td>${status}</td></tr>`;
+  }).join("");
+  const readyHtml = rd ? `<h3>When can it trade?</h3><div class="table-wrap"><table><tr><th>Market</th><th>Entries open</th><th>Closest to a trade right now</th></tr>${rd}</table></div>
+     <p class="muted">It buys only when the edge (fair value − ask − fee) reaches the needed level. Every new window resets this; most windows never reach it.</p>` : "";
+  el.innerHTML = probs + readyHtml + stats + (fair ? `<div class="table-wrap"><table><tr><th>Window</th><th class="num">Fair P(UP)</th><th class="num">Left</th><th class="num">Locked</th><th class="num">Vol /√s</th></tr>${fair}</table></div>` : "")
     + "<h3>Calibration</h3>" + calHtml
     + `<h3>Arbitrage (UP + DOWN)</h3><p class="muted">${arb || "no data yet"}. On Polymarket US both sides share one order book, so this sum is always above $1; logged only.</p>`;
 }

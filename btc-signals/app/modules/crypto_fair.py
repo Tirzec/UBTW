@@ -47,6 +47,7 @@ class CryptoFairModule(StrategyModule):
         self.problems: list[str] = []
         self.last_tick = 0
         self.arb: dict[str, dict] = {}
+        self.ready: dict[str, dict] = {}
         self.notes: dict[str, str] = {}
 
     # ------------------------------------------------------------ data
@@ -149,8 +150,35 @@ class CryptoFairModule(StrategyModule):
                                   "Logged only: on Polymarket US both sides are one order book.", "info")
 
     # ------------------------------------------------------------ PART 2: entries
+    def _readiness(self, now: float) -> None:
+        """For the dashboard: per window, when entries open and how close the best edge is."""
+        f = self.fc
+        thr = float(f.get("min_edge", 0.05))
+        out = {}
+        for dur in self.engine.durations:
+            w = self.engine.discovery.current(dur, now)
+            L = w.end - w.start
+            need = thr * (float(f.get("five_min_multiplier", 2.0)) if dur == "5m" else 1.0)
+            fv = self.fair_now.get(w.slug)
+            best = None
+            if fv is not None:
+                for side, tok in (("UP", w.token_up), ("DOWN", w.token_down)):
+                    bk = self.book(tok)
+                    if not bk or not bk["asks"]:
+                        continue
+                    ask = bk["asks"][0][0]
+                    edge = fv.p_side(side) - ask - fee_per_share(ask, w.fee_schedule)
+                    if best is None or edge > best["edge"]:
+                        best = {"side": side, "edge": round(edge, 4), "ask": ask, "fair": round(fv.p_side(side), 4),
+                                "in_price_range": float(f.get("min_price", 0.05)) <= ask <= float(f.get("max_price", 0.95))}
+            out[dur] = {"opens_in_s": max(0.0, round(w.start + L / 3 - now)),
+                        "closes_in_s": max(0.0, round(w.end - float(f.get("no_entry_last_s", 5)) - now)),
+                        "need": need, "best": best}
+        self.ready = out
+
     def signals(self, now: float) -> list[Signal]:
         self._update(now)
+        self._readiness(now)
         if self.problems:
             return []
         out = []
@@ -269,4 +297,6 @@ class CryptoFairModule(StrategyModule):
         return {"strategy": "fair_value", "problems": self.problems, "basis": self.est.basis,
                 "fair": {slug: {"p_up": round(fv.p_up, 4), "sigma": round(fv.sigma, 3), "locked": fv.locked,
                                 "seconds_left": round(fv.seconds_left)} for slug, fv in self.fair_now.items()},
-                "notes": self.notes, "arbitrage": self.arb, "uptime_s": round(now - self.started)}
+                "notes": self.notes, "arbitrage": self.arb, "uptime_s": round(now - self.started),
+                "ready": self.ready,
+                "warmup_left_s": max(0.0, round(self.started + float(self.fc.get("warmup_s", 600)) - now))}
