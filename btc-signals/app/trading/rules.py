@@ -9,6 +9,8 @@ limit sells (taker, fee charged). All P&L below includes both.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import math
 from dataclasses import dataclass
 
@@ -92,6 +94,7 @@ class ExitDecision:
     action: str               # "SELL" | "HOLD"
     reason: str
     trigger: str = ""         # take_profit | edge_gone | stop_loss | prob_flip | time_exit | hold_to_resolution
+    shares: Optional[float] = None   # SELL only part of the position (copy trading); None = all
 
 
 def evaluate_bot_exit(*, val: Valuation, fair: float | None, seconds_left: float, entry_price: float,

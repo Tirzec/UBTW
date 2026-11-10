@@ -104,6 +104,7 @@ class Engine:
         self.trader = None
         self.traders: dict = {}
         self.sports = None
+        self.copytrade = None
         self.global_risk = None
         tc = cfg.get("trading", {}) or {}
         self.trading_enabled = bool(tc.get("enabled", True))
@@ -125,17 +126,26 @@ class Engine:
             self.trade_store = TradeStore(self.db, mode, self.venue)
 
     # ------------------------------------------------------------ lifecycle
+    @property
+    def predictions_enabled(self) -> bool:
+        """The BTC prediction pipeline (price feeds, 5m/15m models, signals). Off for copy trading: the code is
+        kept (archived), it just does not run."""
+        return bool((self.cfg.get("predictions", {}) or {}).get("enabled", True))
+
     async def start(self) -> None:
-        await self.feeds.seed_history()
-        await self.feeds.start()
-        if self.book_ws is not None:
-            self._tasks.append(asyncio.create_task(self._guard("book-websocket", self.book_ws.run()),
-                                                   name="book-websocket"))
-        for name, coro in (("discovery", self.discovery.run()), ("clob", self.clob.run()),
-                           ("derivs", self.derivs.run()), ("news", self.news.run()),
-                           ("calendar", self.calendar.run()), ("signals", self._signal_loop()),
-                           ("exits", self._exit_loop())):
-            self._tasks.append(asyncio.create_task(self._guard(name, coro), name=name))
+        if self.predictions_enabled:
+            await self.feeds.seed_history()
+            await self.feeds.start()
+            if self.book_ws is not None:
+                self._tasks.append(asyncio.create_task(self._guard("book-websocket", self.book_ws.run()),
+                                                       name="book-websocket"))
+            for name, coro in (("discovery", self.discovery.run()), ("clob", self.clob.run()),
+                               ("derivs", self.derivs.run()), ("news", self.news.run()),
+                               ("calendar", self.calendar.run()), ("signals", self._signal_loop()),
+                               ("exits", self._exit_loop())):
+                self._tasks.append(asyncio.create_task(self._guard(name, coro), name=name))
+        else:
+            log.warning("prediction strategies are OFF (predictions.enabled: false) - code kept, not running")
         if self.trading_enabled:
             await self._start_trader()
 
@@ -197,6 +207,7 @@ class Engine:
             self.traders["crypto_updown"] = self.trader
             await self.trader.start()
         await self._start_sports()
+        await self._start_copytrade()
         if self.reconciler is not None:
             self._tasks.append(asyncio.create_task(self._guard("reconcile", self.reconciler.run()),
                                                    name="reconcile"))
@@ -276,6 +287,38 @@ class Engine:
         await self.sports.start()
         await t.start()
 
+    async def _start_copytrade(self) -> None:
+        """Copy trading: watch the approved traders on international Polymarket (read-only), copy onto
+        Polymarket US. PAPER ONLY in this build, whatever trading.mode says."""
+        cc = self.cfg.get("copytrade", {}) or {}
+        if not cc.get("enabled", False):
+            return
+        if self.venue != "polymarket_us":
+            log.warning("copytrade needs venue: polymarket_us; not started")
+            return
+        if str(cc.get("mode", "paper")) != "paper":
+            log.warning("copytrade.mode %r: live copying is not built yet - running in PAPER", cc.get("mode"))
+        from .copytrade.module import CopyTradeModule
+        from .trading.broker import PaperBroker
+        from .trading.store import TradeStore
+        from .trading.trader import AutoTrader
+        self.copytrade = CopyTradeModule(self, self.cfg, self.http)
+        if not self.copytrade.traders:
+            log.warning("copytrade: no approved traders (copytrade.traders in config.yaml) - not started")
+            return
+        store = TradeStore(self.db, "paper", self.venue, "copytrade")
+        ct = self.copytrade
+
+        def fee_for(tok):
+            m = ct.market(tok.rsplit(":", 1)[0])
+            return m.fee_schedule if m else {"rate": 0.095, "exponent": 1, "takerOnly": True, "round_cents": True}
+        broker = PaperBroker(ct.books.get, ct.books.trades_since, fee_for, ioc_non_post_only=True)
+        t = AutoTrader(self, self.cfg, broker, store, module=ct, exec_conf=cc, global_risk=self.global_risk)
+        ct.attach(store, t)
+        self.traders["copytrade"] = t
+        await ct.start()
+        await t.start()
+
     async def kill_all(self, reason: str) -> int:
         n = 0
         for t in self.traders.values():
@@ -298,6 +341,8 @@ class Engine:
     async def stop(self) -> None:
         for t in getattr(self, "traders", {}).values():
             await t.stop()
+        if getattr(self, "copytrade", None) is not None:
+            await self.copytrade.stop()
         if getattr(self, "sports", None) is not None:
             await self.sports.stop()
         for t in self._tasks:
@@ -692,7 +737,10 @@ class Engine:
             "derivs": self.derivs.snapshot(),
             "notifications": self.notifier.status(),
             "alerts": list(self.alerts)[-20:],
-            "bot": self.trader.snapshot(now) if self.trader else {"mode": "off"},
+            "bot": (self.trader.snapshot(now) if self.trader else
+                    next(iter(self.traders.values())).snapshot(now) if getattr(self, "traders", None)
+                    else {"mode": "off"}),
+            "predictions": self.predictions_enabled,
             "modules": self._modules_snapshot(now),
             "venue": self.venue,
             "live": {"phase": self.live_phase,

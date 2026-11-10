@@ -3,6 +3,7 @@
     python -m app.copytrade candidates [--days 90] [--pool 150] [--backtest 25] [--top 10]
     python -m app.copytrade approve WALLET [WALLET ...]     # writes data/copy_traders.json
     python -m app.copytrade approved                        # show the approved list
+    python -m app.copytrade unpause NAME                    # copy a trader again after an auto-pause
 
 `candidates` pulls the international monthly P&L leaderboards (overall + category boards), scores every trader on the last
 --days days, drops market makers / high-frequency / one-lucky-bet / fast-crypto / 97c+ sweepers / < 50 trades, backtests copying each survivor
@@ -284,7 +285,7 @@ def format_shortlist(res: dict) -> str:
                  f"{(s['profitable_weeks'] or 0):>4.0%} | {b10['pnl']:>+7.2f} {b30['pnl']:>+7.2f} "
                  f"{(b30['pnl_lb'] if b30['pnl_lb'] is not None else 0):>+7.2f} {b30['markets']:>4d} "
                  f"{(b30['avg_copy_cost'] or 0) * 100:>4.1f}c | {rc['pnl']:>+7.2f} | "
-                 f"{us.get('on_us', 0):>3d}/{us.get('buys', 0):<4d} {('-' if not bu else f'{bu['pnl']:+.2f}'):>7s}")
+                 f"{us.get('on_us', 0):>3d}/{us.get('buys', 0):<4d} {('-' if not bu else format(bu['pnl'], '+.2f')):>7s}")
     L += ["",
           "P&L, ROI, win, bets, maxDD, wks+ = the trader's own record in the earlier period (finished positions, incl.",
           "  unredeemed losers; daily P&L curve). copy10s / copy30s = $ P&L of copying every trade with $1, 10 / 30 s late,",
@@ -298,7 +299,7 @@ def format_shortlist(res: dict) -> str:
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.copytrade")
-    ap.add_argument("command", choices=["candidates", "approve", "approved", "show"])
+    ap.add_argument("command", choices=["candidates", "approve", "approved", "show", "unpause"])
     ap.add_argument("wallets", nargs="*")
     ap.add_argument("--days", type=int, default=90)
     ap.add_argument("--pool", type=int, default=150)
@@ -335,6 +336,22 @@ def main(argv=None) -> None:
                                        "backtest_30s": c["backtest"]["30"]})
         APPROVED.write_text(json.dumps(cur, indent=1, default=str))
         print(f"Approved: {', '.join(t['name'] for t in cur['traders'])}")
+    elif a.command == "unpause":
+        # a trader auto-paused after their copies lost money (30+ closed copies): copy them again
+        from ..config import load_config, resolve_path
+        from ..db import DB
+        from .module import load_traders
+        from ..trading.store import TradeStore
+        cfg = load_config()
+        store = TradeStore(DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db"))), "paper",
+                           cfg.get("venue", "polymarket_us"), "copytrade")
+        paused = dict(store.get_state("copy:paused") or {})
+        names = {(t.get("name") or "").lower(): t["wallet"] for t in load_traders(cfg)}
+        for w in a.wallets:
+            wal = names.get(w.lower(), w.lower())
+            print(f"{w}: " + ("copying again (takes effect within a minute)" if paused.pop(wal, None)
+                              else "was not paused"))
+        store.set_state("copy:paused", paused)
     else:
         cur = json.loads(APPROVED.read_text()) if APPROVED.exists() else {"traders": []}
         for t in cur["traders"]:

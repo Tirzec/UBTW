@@ -8,8 +8,8 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand">BTC Up/Down Signals <span class="muted" id="brand-sub"></span></div>
-  <div class="prices">
+  <div class="brand"><span id="brand-name">Copy Trader</span> <span class="muted" id="brand-sub"></span></div>
+  <div class="prices" id="top-prices">
     <div><span class="label">Settlement index</span> <b id="ref-spot">–</b> <span id="ref-src" class="tag"></span></div>
     <div><span class="label">60s TWAP</span> <b id="ref-twap">–</b></div>
     <div><span class="label">Spot</span> <b id="spot">–</b></div>
@@ -37,11 +37,23 @@
       </div>
     </div>
     <nav class="tabs" role="tablist">
-      <button class="tab active" data-tab="crypto" role="tab">Crypto</button>
+      <button class="tab active" data-tab="copy" role="tab">Copy trading</button>
+      <button class="tab" data-tab="crypto" role="tab">Crypto</button>
       <button class="tab" data-tab="sports" role="tab">Sports</button>
       <button class="tab" data-tab="combined" role="tab">Combined</button>
     </nav>
   </section>
+
+  <div id="tab-copy" class="tabpane">
+    <section class="card"><h2>Copy trading <span id="cp-mode" class="tag"></span></h2>
+      <div id="cp-status" class="muted"></div>
+      <div id="cp-risk" class="stats"></div>
+      <h3>Approved traders</h3><div id="cp-traders"></div>
+    </section>
+    <section class="card"><h2>Open copied positions: their entry vs mine</h2><div id="cp-positions"></div></section>
+    <section class="card"><h2>Copy decisions (every trade they made: copied, or why not)</h2><div id="cp-decisions"></div></section>
+    <section class="card"><h2>Closed copies</h2><div id="cp-trades"></div></section>
+  </div>
 
   <div id="tab-combined" class="tabpane hidden">
     <section class="card"><h2>Combined P&amp;L (all modules)</h2><div id="combined"></div></section>
@@ -65,7 +77,7 @@
     </section>
   </div>
 
-  <div id="tab-crypto" class="tabpane">
+  <div id="tab-crypto" class="tabpane hidden">
   <section class="card bot" id="bot">
     <h2>Crypto auto-trader</h2>
     <div id="bot-risk" class="stats"></div>

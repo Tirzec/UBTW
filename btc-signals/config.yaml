@@ -158,8 +158,8 @@ paper:                              # signal log: every signal as a $50 hypothet
 # ---------------------------------------------------------------------------
 trading:
   enabled: true
-  mode: live                       # LIVE: user's explicit choice 2026-11-09 after seeing the backtest (fair-value strategy)
-  live_trading_enabled: true       # second, explicit switch for live
+  mode: paper                      # 2026-11-10: bot reworked into a COPY-TRADING bot, paper first (was live: fair-value crypto)
+  live_trading_enabled: false      # second, explicit switch for live (was true for the crypto strategy)
   min_paper_trades_for_live: 0     # was 300; waived by the user on 2026-11-09 (crypto only, phase-1 caps)
   paper_count_from: "2026-11-09T23:52:00Z"   # new fair-value strategy: only its paper trades count
   live_phase: 1                    # first live phase: hard caps in app/trading/live_phase.py
@@ -260,14 +260,65 @@ notifications:
 # Strategy modules (shared executor, risk, kill switch, paper/live, logging)
 # ---------------------------------------------------------------------------
 modules:
-  crypto_updown: {enabled: true}
+  crypto_updown: {enabled: false}  # ARCHIVED 2026-11-10 (copy trading replaces it); code kept, set true to run it again
+
+# The BTC 5m/15m prediction pipeline (price feeds, models, signal alerts). ARCHIVED for copy trading:
+# false = none of it runs (code kept). true = run it again (also needs modules.crypto_updown.enabled).
+predictions:
+  enabled: false
+
+# ---------------------------------------------------------------------------
+# COPY TRADING (2026-11-10). Watches the approved traders on international Polymarket (public data,
+# read-only; the user accepted that reading it from the US conflicts with polymarket.com's terms) and copies
+# their trades onto POLYMARKET US ONLY. PAPER ONLY in this build: no real orders whatever trading.mode says.
+# Kill switch / STOP button / stop-bot.bat, logging and Windows sleep protection work exactly as before.
+# ---------------------------------------------------------------------------
+copytrade:
+  enabled: true
+  mode: paper
+  traders:                         # approved by the user 2026-11-10 for PAPER copying (audit verdict: weak)
+    - {name: ArielFilipino, wallet: "0xe18ecc345e00ee7c4f2d1f676f3dd2acb112f826"}   # NFL/CFB/NBA spreads, totals
+    - {name: rigatohni, wallet: "0x12e45413131aedc46b68a127354831300485dfc2"}       # US election markets
+  poll_interval_s: 3               # how often each trader's new fills are read
+  stake_usd: 1.0                   # $ per copied trade
+  max_worse: 0.03                  # copy a buy only if the US price is <= their price + 3c
+  min_exit_depth_usd: 5            # ... and at least $5 of buyers within exit_band of the ask (so we can get out)
+  exit_band: 0.05
+  max_spread: 0.05                 # ... and the US bid/ask spread is <= 5c
+  max_per_market_usd: 3            # at most $3 in any single market
+  min_time_to_resolution_s: 3600   # don't copy markets that resolve in under 1 hour
+  max_signal_age_s: 300            # their trade must be seen within 5 min (data feed lag)
+  opposite_side_window_s: 604800   # skip if another approved trader bought the other side within 7 days
+  politics_min_confidence: 0.95    # strict election-market matcher: below this, not copied
+  pause_after_trades: 30           # auto-pause a trader whose copies lost money after 30 closed copies
+  rescore_every_days: 7            # weekly re-score of each trader (alert if their last 30 days lost money)
+  sell_retry_s: 900                # a copied sale with no buyers is retried for 15 min, then held to resolution
+  book_poll_s: 2
+  paper_count_from: "2026-11-10T00:00:00Z"
+  entry:
+    stake_usd: 1.0
+    order_timeout_s: 5             # buy limit rests up to 5 s, the rest is canceled
+    allow_stacking: true           # each copy is its own position (the $3/market cap above still applies)
+  exits:
+    check_interval_s: 1
+    exit_slippage_ticks: 1         # copied sells: limit 1 tick under the best bid
+    exit_order_timeout_s: 5
+  risk:
+    max_stake_usd: 1.0
+    max_total_exposure_usd: 10     # all open copies + orders <= $10
+    max_consecutive_losses: 5      # 5 losing copies in a row -> STOP copying + alert (press Resume to continue)
+    losing_streak_action: pause
+    daily_loss_limit_usd: off
+    min_wallet_balance_usd: off
+    max_api_errors: 3
+    api_error_window_s: 300
 
 risk_global:                       # across ALL modules
   daily_loss_limit_usd: off      # no combined daily stop either
   max_total_exposure_usd: off    # per-module % caps apply
 
 sports:                            # Polymarket US sports (needs venue: polymarket_us)
-  enabled: true
+  enabled: false                   # ARCHIVED 2026-11-10 (copy trading replaces it); code kept
   live_enabled: false              # LIVE also needs trading.mode: live and 200 paper sports trades
   min_paper_trades_for_live: 200
   leagues:                         # Polymarket US league slugs; buffer = required edge per league

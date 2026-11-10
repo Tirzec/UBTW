@@ -59,6 +59,13 @@ function handleAlerts(alerts) {
 
 // ------------------------------------------------------------------ render
 function renderTop(s) {
+  const pred = s.predictions !== false;
+  $("brand-name").textContent = pred ? "BTC Up/Down Signals" : "Copy Trader";
+  $("top-prices").classList.toggle("hidden", !pred);
+  if (!pred) {                                   // BTC prediction pipeline archived: no BTC data, no BTC banners
+    ["banner-degraded", "banner-rules", "banner-blackout"].forEach((id) => $(id).classList.add("hidden"));
+    return;
+  }
   const r = s.reference || {};
   $("ref-spot").textContent = usd(r.spot);
   $("ref-twap").textContent = usd(r.twap);
@@ -326,11 +333,11 @@ $("bot-resume").onclick = async () => {
 };
 
 // ------------------------------------------------------------------ tabs
-let activeTab = (() => { try { return localStorage.getItem("tab") || "crypto"; } catch (e) { return "crypto"; } })();
+let activeTab = (() => { try { return localStorage.getItem("tab") || "copy"; } catch (e) { return "copy"; } })();
 function showTab(name) {
   activeTab = name;
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-  ["crypto", "sports", "combined"].forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== name));
+  ["copy", "crypto", "sports", "combined"].forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== name));
   try { localStorage.setItem("tab", name); } catch (e) {}
 }
 document.querySelectorAll(".tab").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
@@ -396,6 +403,58 @@ function renderSports(m) {
   $("sp-by-bet").innerHTML = statsTable(m.by_bet_type);
 }
 
+function renderCopy(m) {
+  if (!m) { $("cp-status").textContent = "Copy trading off (copytrade.enabled in config.yaml; needs approved traders and venue: polymarket_us)."; return; }
+  const st = m.module_state || {}, r = m.risk || {}, a = m.stats_all || {};
+  const cls = (x) => (x == null ? "" : x >= 0 ? "pos" : "neg");
+  const cell = (l, v, c = "") => `<div><span class="label">${l}</span><b class="${c}">${v}</b></div>`;
+  const ago = (ts) => {
+    if (!ts) return "–";
+    const s = Date.now() / 1000 - ts;
+    return s < 120 ? Math.round(s) + " s ago" : s < 7200 ? Math.round(s / 60) + " min ago"
+      : s < 172800 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " days ago";
+  };
+  const rules = st.rules || {};
+  $("cp-mode").textContent = "PAPER";
+  $("cp-status").textContent = `Copies $${rules.stake_usd ?? 1} per trade onto Polymarket US (simulated fills on the real US order book). ` +
+    `Feed lag ${st.feed_lag_s == null ? "–" : Math.round(st.feed_lag_s) + " s"} (their trade -> seen here).` +
+    (r.halted ? ` · HALTED: ${r.halt_reason}` : "") + (m.status_note ? ` · ${m.status_note}` : "");
+  const open = (st.positions || []).reduce((s, p) => s + (p.cost || 0), 0);
+  $("cp-risk").innerHTML = cell("Copy P&L (closed)", a.n ? signed(a.total_pnl) : "–", cls(a.total_pnl)) +
+    cell("Open exposure", `${usd(open)} / ${usd(r.max_exposure || 0, 0)}`) +
+    cell("Losses in a row", `${r.consecutive_losses || 0} / ${r.max_consecutive_losses ?? "off"}`) +
+    cell("Win rate", a.n ? pct(a.win_rate) + ` (${a.n})` : "–");
+  $("cp-traders").innerHTML = `<div class="table-wrap"><table><tr><th>Trader</th><th>Last trade</th><th class="num">Copies (open)</th><th class="num">Copy P&L</th><th class="num">Win</th><th class="num">Avg copy cost</th><th>Their last 30 days</th><th>Status</th></tr>` +
+    (st.traders || []).map((t) => {
+      const s = t.stats || {}, rs = t.rescore || {};
+      return `<tr><td><b>${esc(t.name)}</b><br><span class="muted">${esc(t.wallet.slice(0, 10))}…</span></td>
+      <td>${ago(t.last_trade_ts)}${t.feed_error ? `<br><span class="blocked">${esc(t.feed_error)}</span>` : ""}</td>
+      <td class="num">${s.copies || 0} (${s.open || 0})</td><td class="num ${cls(s.pnl)}">${s.closed ? signed(s.pnl) : "–"}</td>
+      <td class="num">${s.win_rate == null ? "–" : pct(s.win_rate)}</td>
+      <td class="num">${s.avg_copy_cost == null ? "–" : signed(s.avg_copy_cost * 100, 1) + "¢"}</td>
+      <td class="muted">${rs.error ? esc(rs.error) : rs.entries != null ? `${rs.entries} trades, P&L ${signed(rs.realized_pnl || 0, 0)}, win ${pct(rs.win_rate || 0)}` : "–"}${rs.alert ? `<br><span class="blocked">${esc(rs.alert)}</span>` : ""}</td>
+      <td>${t.paused ? `<span class="tag bad">PAUSED</span> <span class="muted">${esc(t.paused)}</span>` : '<span class="tag ok">copying</span>'}</td></tr>`;
+    }).join("") + "</table></div>";
+  $("cp-positions").innerHTML = (st.positions || []).length ? `<div class="table-wrap"><table><tr><th>Copy of</th><th>Market</th><th class="num">Their price</th><th class="num">My price</th><th class="num">Shares (sold)</th><th class="num">Bid now / value</th><th>Resolves</th></tr>` +
+    st.positions.map((p) => `<tr><td>${esc(p.trader || "")}</td><td><b>${esc(p.side)}</b><br><span class="muted">${esc(p.market)} · ${esc(p.status)}</span></td>
+      <td class="num">${num(p.their_price, 3)}</td><td class="num">${num(p.my_price, 3)}</td>
+      <td class="num">${num(p.shares, 2)}${p.sold ? " (" + num(p.sold, 2) + ")" : ""}</td>
+      <td class="num">${p.bid == null ? "–" : num(p.bid, 3)} / ${p.value == null ? "–" : usd(p.value)}</td><td>${fmtTime(p.resolves)}</td></tr>`).join("") + "</table></div>"
+    : '<p class="muted">no open copies</p>';
+  const okAct = { copy: 1, order: 1, sell: 1 };
+  $("cp-decisions").innerHTML = (st.decisions || []).length ? `<div class="table-wrap"><table><tr><th>When</th><th>Trader</th><th>Their trade</th><th class="num">Their price</th><th class="num">US ask</th><th>Decision</th></tr>` +
+    st.decisions.slice(0, 40).map((d) => `<tr><td>${fmtTime(d.ts)}</td><td>${esc(d.trader || "")}</td>
+      <td>${esc(d.side || "")} <b>${esc(d.outcome || "")}</b><br><span class="muted">${esc((d.market || "").slice(0, 70))}</span></td>
+      <td class="num">${d.their_price == null ? "–" : num(d.their_price, 3)}</td><td class="num">${d.us_ask == null ? "–" : num(d.us_ask, 3)}</td>
+      <td><span class="tag ${okAct[d.action] ? "ok" : ""}">${esc(d.action)}</span> <span class="muted">${esc(d.reason || "")}</span></td></tr>`).join("") + "</table></div>"
+    : '<p class="muted">waiting for the approved traders to trade (nothing from before the bot started is copied)</p>';
+  $("cp-trades").innerHTML = (m.trades || []).length ? `<div class="table-wrap"><table><tr><th>Closed</th><th>Copy of</th><th>Bet</th><th class="num">Entry → exit</th><th class="num">P&L</th><th>Why</th></tr>` +
+    m.trades.slice(0, 25).map((p) => `<tr><td>${fmtTime(p.closed_ts)}</td><td>${esc(p.copy_leader_name || p.duration || "")}</td><td><b>${esc(p.side)}</b> <span class="muted">${esc(p.slug)}</span></td>
+      <td class="num">${num(p.entry_price, 3)} → ${p.exit_price ? num(p.exit_price, 3) : num(p.payout / Math.max(p.shares, 1e-9), 2)}</td>
+      <td class="num ${cls(p.pnl)}">${signed(p.pnl)}</td><td class="muted">${esc(p.exit_reason || "")}</td></tr>`).join("") + "</table></div>"
+    : '<p class="muted">no closed copies yet</p>';
+}
+
 function renderCombined(mods) {
   const g = (mods || {})._global || {};
   const rows = Object.entries(mods || {}).filter(([k]) => k !== "_global").map(([k, m]) => {
@@ -413,6 +472,7 @@ function renderCombined(mods) {
 
 function render(s) {
   state = s;
+  renderCopy((s.modules || {}).copytrade);
   renderSports((s.modules || {}).sports);
   renderCombined(s.modules);
   renderBot(s.bot);

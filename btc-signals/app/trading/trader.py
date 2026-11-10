@@ -400,6 +400,8 @@ class AutoTrader:
         return tot
 
     def _window_busy(self, slug: str, now: float) -> bool:
+        if self.ec.get("allow_stacking"):          # copy trading: each copy is its own position (module caps $/market)
+            return False
         if any(p["slug"] == slug for p in self.store.active_positions()):
             return True
         n = self.store.db.query("SELECT COUNT(*) n FROM bot_positions WHERE mode=? AND slug=? AND "
@@ -428,6 +430,8 @@ class AutoTrader:
     def _skip(self, sig, reason: str) -> None:
         self.status_note = f"{sig.label} {sig.side} signal skipped: {reason}"
         self._log_signal(sig, "skipped", reason)
+        if hasattr(self.module, "on_skip"):
+            self.module.on_skip(sig, reason)
 
     async def _maybe_enter(self, sig, now: float) -> None:
         m = self.module.market(sig.market_id)
@@ -498,7 +502,8 @@ class AutoTrader:
                                       rules=RULES_VERSION if (sig.extra or {}).get("strategy") else None,
                                       signal_ask=(sig.extra or {}).get("ask"),
                                       signal_book_ts=(sig.extra or {}).get("book_ts"),
-                                      reasons=json.dumps([r.as_dict() for r in sig.reasons][:5]))
+                                      reasons=json.dumps([r.as_dict() for r in sig.reasons][:5]),
+                                      **((sig.extra or {}).get("position_fields") or {}))
         t_send = time.time()
         o = await self.broker.place_limit(token=token, side="BUY", price=plan.price, size=plan.shares,
                                           post_only=plan.post_only,
@@ -506,6 +511,8 @@ class AutoTrader:
         self.store.order(o, pid, "entry")
         self.store.update_position(pid, entry_order=o.order_id, order_sent_ts=t_send)
         self._log_signal(sig, "entered", f"BUY @ {plan.price:.2f} (ask {(sig.extra or {}).get('ask')})", pid)
+        if hasattr(self.module, "on_entered"):
+            self.module.on_entered(sig, pid, o)
         self._record_entry_latency(pid, sig, now, t_send)
         self.store.event("order", f"BUY {side} {plan.shares:.2f} @ {plan.price:.2f} "
                          f"({'post-only' if plan.post_only else 'limit'}) {sig.market_id}", position=pid,
@@ -560,8 +567,10 @@ class AutoTrader:
                                    tp_price=tp, sl_price=sl)
         self.store.event("fill", f"BOUGHT {p['side']} {o.filled:.2f} @ {o.avg_price:.3f} fee {o.fee:.4f}",
                          position=p["id"], order=o.order_id)
+        levels = "" if self.module.name == "copytrade" else f" TP bid ≥{tp:.2f}, SL bid ≤{sl:.2f}."
+        extra = (f" (they paid {p['copy_leader_price']:.3f})" if p.get("copy_leader_price") is not None else "")
         self._alert(f"Bought {p['duration']} {p['side']} @ {o.avg_price:.2f}",
-                    f"{o.filled:.1f} shares, ${o.notional:.2f}. TP bid ≥{tp:.2f}, SL bid ≤{sl:.2f}.")
+                    f"{o.filled:.1f} shares, ${o.notional:.2f}.{levels}{extra}")
 
     def _record_entry_latency(self, pid: int, sig, t_signal: float, t_send: float) -> None:
         """Book update received -> entry order sent. Alert if the median is regularly over the limit."""
@@ -828,7 +837,13 @@ class AutoTrader:
         tick = m.tick_size if m else 0.01
         floor = round_price(max(tick, book["bids"][0][0] - int(self.xc.get("exit_slippage_ticks", 2)) * tick), tick)
         t_send = time.time()
-        o = await self.broker.place_limit(token=p["token"], side="SELL", price=floor, size=round(shares, 2),
+        size = round(shares, 2)
+        if dec.shares is not None:                 # partial sale (copy trading: same fraction as the trader)
+            from .rules import round_down
+            size = round(round_down(min(dec.shares, shares), m.size_step if m else 0.01), 2)
+            if size <= 0 or (m and size < m.min_size and size < round(shares, 2)):
+                return False
+        o = await self.broker.place_limit(token=p["token"], side="SELL", price=floor, size=size,
                                           post_only=False)
         o.purpose = "exit"
         self._record_latency(p, book, t_decide, t_send, time.time(), dec)
@@ -836,7 +851,7 @@ class AutoTrader:
         fair_now, _ = self.module.fair(p)
         self.store.update_position(p["id"], status="closing", exit_order=o.order_id,
                                    exit_reason=dec.reason, exit_trigger=dec.trigger, fair_at_exit=fair_now)
-        self.store.event("order", f"SELL {p['side']} {shares:.2f} @ >= {floor:.2f}: {dec.reason}",
+        self.store.event("order", f"SELL {p['side']} {size:.2f} @ >= {floor:.2f}: {dec.reason}",
                          position=p["id"], order=o.order_id, status=o.status)
         if o.status == "rejected":
             self.store.update_position(p["id"], status="open", exit_order=None)

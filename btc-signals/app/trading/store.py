@@ -108,6 +108,9 @@ class TradeStore:
         "strategy": "TEXT", "time_left_s": "REAL", "side_won": "INTEGER", "fair_at_exit": "REAL",
         "lock_order": "TEXT", "lock_filled": "REAL", "lock_notional": "REAL", "lock_fee": "REAL",
         "rules": "TEXT", "signal_ask": "REAL", "signal_book_ts": "REAL", "order_sent_ts": "REAL", "first_fill_ts": "REAL",
+        # copy trading: who we copied, their price, their intl token/market, expected resolution time
+        "copy_leader": "TEXT", "copy_leader_name": "TEXT", "copy_leader_price": "REAL", "copy_src_token": "TEXT",
+        "copy_src_condition": "TEXT", "copy_resolve_ts": "REAL",
     }
 
     def __init__(self, db, mode: str, venue: str = "polymarket_intl", module: str = "crypto_updown"):
