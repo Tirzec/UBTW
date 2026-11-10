@@ -173,7 +173,7 @@ def test_report_compares_old_and_new_rules(tmp_path):
     _pos(st, exit_shares=10, exit_proceeds=7.0, exit_trigger="profit_take", pnl=1.0, side_won=1)   # old: left 3.0
     _pos(st, pnl=-6.0, side_won=0, exit_trigger="resolution")
     _pos(st, rules=RULES_VERSION, pnl=4.0, side_won=1, exit_trigger="resolution", payout=10)
-    _pos(st, rules=RULES_VERSION, status="void", entry_order="x")
+    _pos(st, rules=RULES_VERSION, status="void", entry_order="x", exit_reason="entry not filled in time")
     st.signal(slug="btc-updown-15m-2026-11-10-1200", side="UP", edge=0.06, decision="skipped",
               reason="already holding #3", rules=RULES_VERSION)
     a = analyse(e.db, mode="live", days=1)
@@ -198,3 +198,60 @@ def test_rules_report_alert_once_after_n_trades(tmp_path):
     assert sum("old vs new" in a[1] for a in e.alerts) == 1
     t._rules_report(st.position(ids[1]))
     assert sum("old vs new" in a[1] for a in e.alerts) == 1                # only once
+
+
+def test_stop_requested_blocks_an_entry_already_past_the_loop_check(tmp_path):
+    e, b, t = _setup(tmp_path)
+
+    async def run():
+        now = time.time()
+        e.book("UP", 0.50, 0.54)
+        e.signal("UP", 0.70)
+        t.store.set_state("kill_requested", {"ts": now, "reason": "test"})
+        await t._entry_pass(now)                      # tick() has not run kill() yet
+        assert not t.store.active_positions() and not b.orders
+    asyncio.run(run())
+
+
+def test_kill_waits_for_an_entry_in_flight_and_cancels_it(tmp_path):
+    e, b, t = _setup(tmp_path)
+    real_place = b.place_limit
+
+    async def run():
+        gate = asyncio.Event()                        # created inside the loop (Python 3.9)
+
+        async def slow_place(**kw):
+            await gate.wait()                         # order is "on the wire"
+            return await real_place(**kw)
+        b.place_limit = slow_place
+        now = time.time()
+        e.book("UP", 0.50, 0.54)
+        e.signal("UP", 0.70)
+
+        async def entry():
+            async with t._lock:
+                await t._entry_pass(now)
+        et = asyncio.ensure_future(entry())
+        await asyncio.sleep(0.01)
+        kt = asyncio.ensure_future(t.kill("test"))
+        await asyncio.sleep(0.01)
+        assert not kt.done()                          # waits for the in-flight entry
+        gate.set()
+        await et
+        await kt
+        p, = t.store.db.query("SELECT * FROM bot_positions")
+        assert p["entry_order"]                       # the order id was recorded ...
+        assert b.ex[p["entry_order"]]["state"] == "canceled"     # ... and the kill cancelled it
+        assert p["status"] == "void" and t.risk.state.halted
+    asyncio.run(run())
+
+
+def test_report_separates_rejected_from_unfilled(tmp_path):
+    e = FakeEngine(tmp_path, int(time.time()) - 60)
+    st = TradeStore(e.db, "live", venue="polymarket_us")
+    _pos(st, rules=RULES_VERSION, status="void", exit_reason="entry not filled in time")
+    _pos(st, rules=RULES_VERSION, status="void", exit_reason="entry rejected: insufficient balance")
+    a = analyse(e.db, mode="live", days=1)
+    k = [k for k in a["entries"] if k != "old rules"][0]
+    assert a["entries"][k]["unfilled_cancelled"] == 1 and a["entries"][k]["rejected"] == 1
+    assert "100% of orders placed" in format_report(a)

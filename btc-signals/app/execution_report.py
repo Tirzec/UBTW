@@ -41,7 +41,7 @@ def entries(db, rows: list[dict]) -> dict:
     for key in sorted({_rules(r) for r in rows}):
         g = [r for r in rows if _rules(r) == key]
         lat_order, lat_fill, lat_data, slip = [], [], [], []
-        filled = unfilled = partial = 0
+        filled = unfilled = partial = rejected = other_void = 0
         for r in g:
             o = db.query("SELECT * FROM bot_orders WHERE order_id=? ORDER BY id LIMIT 1", (r["entry_order"],))
             o = o[0] if o else None
@@ -50,16 +50,25 @@ def entries(db, rows: list[dict]) -> dict:
             if r.get("signal_book_ts") and (r.get("order_sent_ts") or o):
                 lat_data.append(((r.get("order_sent_ts") or o["ts"]) - r["signal_book_ts"]) * 1000)
             if r["status"] == "void":
-                unfilled += 1
+                why = r.get("exit_reason") or ""
+                if why == "entry not filled in time":
+                    unfilled += 1
+                elif why.startswith("entry rejected"):
+                    rejected += 1
+                else:
+                    other_void += 1
                 continue
             filled += 1
             if o and o["filled"] is not None and o["size"] and o["filled"] < o["size"] - 1e-9:
                 partial += 1
-            if o and r.get("filled_ts"):
-                lat_fill.append((r["filled_ts"] - o["ts"]) * 1000)
+            t_fill = r.get("first_fill_ts") or r.get("filled_ts")
+            t_ord = r.get("order_sent_ts") or (o["ts"] if o else None)
+            if t_fill and t_ord:
+                lat_fill.append((t_fill - t_ord) * 1000)
             if r.get("signal_ask") and r.get("entry_price"):
                 slip.append(r["entry_price"] - r["signal_ask"])
         out[key] = {"attempts": len(g), "filled": filled, "unfilled_cancelled": unfilled, "partial": partial,
+                    "rejected": rejected, "void_other": other_void,
                     "signal_to_order_ms": _summ(lat_order), "data_to_order_ms": _summ(lat_data),
                     "order_to_fill_ms": _summ(lat_fill),
                     "fill_vs_signal_ask": (mean(slip) if slip else None),
@@ -182,13 +191,18 @@ def format_report(a: dict) -> str:
     L = [f"{a['n']} fair-value entry attempts", "", "=== OLD vs NEW RULES ===", compare_text(a), "",
          "=== ENTRIES ==="]
     for key, e in a["entries"].items():
+        rested = e["attempts"] - e["rejected"] - e["void_other"]
         L.append(f"[{key}] attempts {e['attempts']}: filled {e['filled']}, cancelled unfilled {e['unfilled_cancelled']}"
-                 f" ({(e['unfilled_cancelled'] / e['attempts']):.0%} - price moved away before filling)"
+                 + (f" ({e['unfilled_cancelled'] / rested:.0%} of orders placed - price moved away before filling)"
+                    if rested > 0 else "")
+                 + (f", rejected by the exchange {e['rejected']}" if e["rejected"] else "")
+                 + (f", lost on restart {e['void_other']}" if e["void_other"] else "")
                  if e["attempts"] else f"[{key}] no attempts")
         L.append(f"   signal -> order placed: {_ms(e['signal_to_order_ms'])}")
         L.append(f"   book update -> order placed: {_ms(e['data_to_order_ms'])}"
                  + ("" if e["data_to_order_ms"] else "  (recorded from 2026-11-10 on)"))
-        L.append(f"   order -> fill: {_ms(e['order_to_fill_ms'])}; partial fills {e['partial']}")
+        L.append(f"   order -> first fill seen: {_ms(e['order_to_fill_ms'])} (resting orders: checked every 250 ms; "
+                 f"older trades: when the fill was booked); partial fills {e['partial']}")
         if e["fill_vs_signal_ask"] is not None:
             L.append(f"   fill price vs ask at the signal: {e['fill_vs_signal_ask']:+.3f} on average")
         sg = e["signals"]

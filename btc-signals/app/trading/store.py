@@ -107,7 +107,7 @@ class TradeStore:
         "starts_at": "REAL", "reasons": "TEXT", "closing_fair": "REAL", "clv": "REAL",
         "strategy": "TEXT", "time_left_s": "REAL", "side_won": "INTEGER", "fair_at_exit": "REAL",
         "lock_order": "TEXT", "lock_filled": "REAL", "lock_notional": "REAL", "lock_fee": "REAL",
-        "rules": "TEXT", "signal_ask": "REAL", "signal_book_ts": "REAL", "order_sent_ts": "REAL",
+        "rules": "TEXT", "signal_ask": "REAL", "signal_book_ts": "REAL", "order_sent_ts": "REAL", "first_fill_ts": "REAL",
     }
 
     def __init__(self, db, mode: str, venue: str = "polymarket_intl", module: str = "crypto_updown"):

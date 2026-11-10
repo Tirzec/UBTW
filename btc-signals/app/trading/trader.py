@@ -142,8 +142,23 @@ class AutoTrader:
     # ------------------------------------------------------------ control
     async def kill(self, reason: str = "STOP pressed") -> int:
         """Kill switch: cancel every open order and halt all trading (entries AND exits)."""
-        self.risk.halt(f"KILL SWITCH: {reason}")
+        self.risk.halt(f"KILL SWITCH: {reason}")    # first: no new entry gets past the blockers from now on
         self._save()
+        # wait for an entry/exit already in flight (e.g. inside place_limit) to record its order id, so
+        # cancel_all and the position walk below see it. Never wait forever: the kill switch must finish.
+        locked = False
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=10)
+            locked = True
+        except asyncio.TimeoutError:
+            self.store.event("warning", "kill: trading step still busy after 10 s, cancelling anyway", "WARNING")
+        try:
+            return await self._kill_body(reason)
+        finally:
+            if locked:
+                self._lock.release()
+
+    async def _kill_body(self, reason: str) -> int:
         n = 0
         try:
             n = await self.broker.cancel_all()
@@ -226,10 +241,19 @@ class AutoTrader:
             self._entry_task = asyncio.create_task(self._entry_loop(), name="autotrader-entries")
 
     async def stop(self) -> None:
-        for t in (self._task, self._entry_task):
-            if t:
-                t.cancel()
-                await asyncio.gather(t, return_exceptions=True)
+        try:                                        # never cancel in the middle of placing an order
+            await asyncio.wait_for(self._lock.acquire(), timeout=10)
+            got = True
+        except asyncio.TimeoutError:
+            got = False
+        try:
+            for t in (self._task, self._entry_task):
+                if t:
+                    t.cancel()
+                    await asyncio.gather(t, return_exceptions=True)
+        finally:
+            if got:
+                self._lock.release()
         bs = self._book_store()
         if bs is not None and self._book_event.set in bs.listeners:
             bs.listeners.remove(self._book_event.set)
@@ -460,6 +484,9 @@ class AutoTrader:
         if why:
             self._skip(sig, why)
             return
+        if self.risk.state.halted or self.store.get_state("kill_requested"):
+            self._skip(sig, "STOP requested")       # kill() runs on the next tick: never enter meanwhile
+            return
         pid = self.store.new_position(slug=sig.market_id, duration=sig.label, side=side, token=token,
                                       condition_id=m.condition_id, status="opening",
                                       entry_price=plan.price, p_model=sig.fair_prob, edge=sig.edge,
@@ -490,6 +517,8 @@ class AutoTrader:
             if o.error.startswith("post_only_would_cross"):
                 return                               # book moved; try again next tick
             raise BrokerError(f"entry rejected: {o.error}")
+        if o.filled > 0:
+            self.store.update_position(pid, first_fill_ts=time.time())
         if o.status == "filled":
             await self._finish_entry(self.store.position(pid))
         # otherwise it rests; _manage() polls it and cancels after order_timeout_s
@@ -559,6 +588,8 @@ class AutoTrader:
         if p["status"] == "opening":
             o = await self.broker.poll(p["entry_order"])
             self.store.order(o, p["id"], "entry")
+            if o.filled > 0 and not p.get("first_fill_ts"):
+                self.store.update_position(p["id"], first_fill_ts=now)
             timeout = float(self.ec.get("order_timeout_s", 8))
             if o.filled >= o.size - 1e-9 or now - o.created >= timeout or \
                     (m and m.entry_deadline is not None and now >= m.entry_deadline):

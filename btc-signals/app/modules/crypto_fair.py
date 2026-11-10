@@ -106,6 +106,7 @@ class CryptoFairModule(StrategyModule):
         if sec % 30 == 0 and self.fair_now:
             self.sigma_hist.append((now, next(iter(self.fair_now.values())).sigma))
         self._arb_watch(now)
+        self._fair_ts = now                                   # when fair values last changed
         self._precompute(now)
         self._readiness(now)
 
@@ -249,7 +250,9 @@ class CryptoFairModule(StrategyModule):
                 if limit < c["min_p"] - 1e-9:
                     limit = ask                       # one tick under the ask would leave the 55c band
                 if best is None or edge > best[0]:
-                    best = (edge, side, tok, p, ask, limit, bk.get("updated"))
+                    # trigger time = the later of the book update and the fair-value update
+                    best = (edge, side, tok, p, ask, limit,
+                            max(bk.get("updated") or 0, getattr(self, "_fair_ts", 0)) or None)
             if best is None:
                 continue
             edge, side, tok, p, ask, limit, book_ts = best
