@@ -144,7 +144,7 @@ class CopyTradeModule(StrategyModule):
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
-        self.keep = {str(k): float(v) for k, v in (self.store.get_state("copy:keep") or {}).items()}
+        self.keep = {str(k): float(v) for k, v in (self.store.get_state(self.sk("copy:keep")) or {}).items()}
         catchup: dict = {}
         for p in self.store.active_positions():          # positions recovered after a restart
             if p.get("copy_leader") and p.get("copy_src_token"):
@@ -421,7 +421,7 @@ class CopyTradeModule(StrategyModule):
     def _save_keep(self) -> None:
         live = {str(p["id"]) for p in self.store.active_positions()}
         self.keep = {k: v for k, v in self.keep.items() if k in live}
-        self.store.set_state("copy:keep", self.keep)
+        self.store.set_state(self.sk("copy:keep"), self.keep)
 
     # ------------------------------------------------------------ AutoTrader hooks
     def signals(self, now: float) -> list[Signal]:

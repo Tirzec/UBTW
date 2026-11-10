@@ -17,6 +17,7 @@ import base64
 import json
 import time
 import uuid
+import weakref
 from typing import Callable
 
 import httpx
@@ -163,6 +164,8 @@ def apply_order_status(o: OrderState, order: dict) -> OrderState:
 
 class UsLiveBroker:
     mode = "live"
+    # every live broker on this account (one per module): lost-order matching must see all their orders
+    _instances: "weakref.WeakSet" = weakref.WeakSet()
 
     def __init__(self, key_id: str, secret: str, fee_schedule_for: Callable[[str], dict],
                  client: httpx.AsyncClient | None = None, base: str = API,
@@ -180,6 +183,7 @@ class UsLiveBroker:
         self._known_trades: set[str] = set()
         self.visibility_timeout_s = 10.0
         self.visibility_poll_s = 0.4
+        UsLiveBroker._instances.add(self)
 
     async def _req(self, method: str, path: str, body: dict | None = None) -> dict:
         try:
@@ -226,7 +230,10 @@ class UsLiveBroker:
         if not o.order_id:
             raise BrokerError(f"no order id in response: {d}")
         self.orders[o.order_id] = o
-        return await self.wait_visible(o.order_id, 3.0)
+        try:
+            return await self.wait_visible(o.order_id, 3.0)
+        except (BrokerError, Maintenance):
+            return o          # the order EXISTS: hand it back (not done) so the caller follows / cancels it
 
     async def find_lost_order(self, o: OrderState, body: dict, t0: float, settle_s: float = 2.0,
                               tries: int = 3) -> OrderState | None:
@@ -235,6 +242,7 @@ class UsLiveBroker:
         Immediate orders: new trades on that market since we sent it (GET /v1/portfolio/activities).
         The exchange has no client order ID, so this matching is the duplicate guard."""
         slug = body["marketSlug"]
+        ambiguous = False
         for i in range(tries):
             await asyncio.sleep(settle_s if i == 0 else 1.0)
             try:
@@ -257,15 +265,17 @@ class UsLiveBroker:
                     # buy) makes trade history ambiguous: never book its fills as this order's. Leave the
                     # outcome unknown instead (the caller does not re-send; reconciliation watches).
                     if any(x is not o and x.token.rsplit(":", 1)[0] == slug and (not x.done or x.created >= t0 - 30)
-                           for x in self.orders.values()):
-                        return None
+                           for b in list(UsLiveBroker._instances) for x in list(b.orders.values())):
+                        ambiguous = True               # keep re-scanning the open orders, skip trade history
+                        continue
                     trades = await self.recent_trades(slug, since=t0 - 1.0)
                     plong = float(body["price"]["value"])
                     buys_long = body["intent"] in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_SELL_SHORT")
                     new = [t for t in trades if t["id"] not in self._known_trades and t.get("aggressor", True)
                            and (t["price"] <= plong + 1e-9 if buys_long else t["price"] >= plong - 1e-9)]
                     if sum(t["qty"] for t in new) > float(body["quantity"]) + 1e-9:
-                        return None                        # more than this order could have filled: ambiguous
+                        ambiguous = True                   # more than this order could have filled
+                        continue
                     if new:
                         self._known_trades.update(t["id"] for t in new)
                         qty = sum(t["qty"] for t in new)
@@ -280,7 +290,7 @@ class UsLiveBroker:
                         o.error = "recovered from trade history after a network error (fee estimated)"
                         self.orders[o.order_id] = o
                         return o
-            except BrokerError:
+            except (BrokerError, Maintenance):
                 continue
         return None
 

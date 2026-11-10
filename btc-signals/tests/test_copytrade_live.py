@@ -255,3 +255,71 @@ def test_live_confirmation_shows_the_copy_trading_limits(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "COPY TRADING with REAL MONEY: $1 per copied trade" in out
     assert "max exposure $10" in out and "stop after 5 losses in a row" in out
+
+
+def test_order_that_exists_is_returned_even_if_the_first_read_fails():
+    from app.trading.broker import BrokerError
+    from app.trading.us_broker import UsLiveBroker
+    b = UsLiveBroker("k", base64.b64encode(os.urandom(32)).decode(), lambda t: {})
+
+    async def req(method, path, body=None):
+        if method == "POST":
+            return {"id": "o1"}
+        raise BrokerError("ReadTimeout: ")                  # GET /v1/order/o1 times out
+    b._req = req
+    o = asyncio.run(b.place_limit(token="m:long", side="BUY", price=0.5, size=2, post_only=False, ioc=False))
+    assert o.order_id == "o1" and not o.done and "o1" in b.orders  # followed + canceled by the trader
+    asyncio.run(b.client.aclose())
+
+
+def test_rate_limit_during_lost_order_lookup_still_reports_unknown_outcome():
+    from app.trading.broker import BrokerError, Maintenance
+    from app.trading.us_broker import UsLiveBroker
+    b = UsLiveBroker("k", base64.b64encode(os.urandom(32)).decode(), lambda t: {})
+
+    async def req(method, path, body=None):
+        if method == "POST":
+            raise BrokerError("ReadTimeout: ")
+        raise Maintenance("rate limited (429)", 2)
+
+    async def fast_sleep(_):
+        return None
+    b._req = req
+    orig = asyncio.sleep
+    asyncio.sleep = fast_sleep
+    try:
+        with pytest.raises(BrokerError, match="outcome unknown"):
+            asyncio.run(b.place_limit(token="m:long", side="BUY", price=0.5, size=2, post_only=False, ioc=False))
+    finally:
+        asyncio.sleep = orig
+    asyncio.run(b.client.aclose())
+
+
+def test_expired_position_with_the_wrong_quantity_is_still_a_mismatch(tmp_path):
+    from app.trading import reconcile as R
+
+    class Eng:
+        def __init__(self, st):
+            self.trade_store, self.kills = st, []
+
+        async def kill_all(self, reason):
+            self.kills.append(reason)
+
+        def alert(self, *a):
+            pass
+
+    class Brk:
+        async def _req(self, method, path, body=None):
+            if path == "/v1/portfolio/positions":
+                return {"positions": {"ok": {"netPositionDecimal": "2", "expired": True},
+                                      "bad": {"netPositionDecimal": "0.8", "expired": True},
+                                      "old": {"netPositionDecimal": "5", "expired": True}}}
+            return {"orders": []}
+    db = DB(str(tmp_path / "x.db"))
+    st = TradeStore(db, "live", "polymarket_us", "copytrade")
+    for slug in ("ok", "bad"):
+        pid = st.new_position(slug=slug, duration="T", side="x", token=f"{slug}:long", status="open",
+                              opened_ts=1.0, entry_price=0.5)
+        st.update_position(pid, shares=2.0)
+    r = asyncio.run(R.Reconciler(Eng(TradeStore(db, "live", "polymarket_us")), Brk(), db).startup())
+    assert len(r.mismatches) == 1 and r.mismatches[0].startswith("bad:")   # 'old' = an already-closed copy

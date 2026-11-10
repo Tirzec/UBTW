@@ -54,15 +54,15 @@ def parse_positions(d: dict) -> dict:
     return out
 
 
-def parse_expired(d: dict) -> set:
-    """Slugs GET /v1/portfolio/positions reports as expired (settling / settled): not a mismatch."""
-    out = set()
+def parse_expired(d: dict) -> dict:
+    """{slug: net quantity} of positions GET /v1/portfolio/positions reports as expired (settling/settled)."""
+    out = {}
     pos = (d or {}).get("positions") or {}
     items = pos.items() if isinstance(pos, dict) else [(p.get("marketSlug") or (p.get("marketMetadata") or {}).get("slug"), p)
                                                       for p in pos]
     for slug, p in items:
         if slug and isinstance(p, dict) and p.get("expired"):
-            out.add(slug)
+            out[slug] = _f(p.get("netPositionDecimal", p.get("netPosition")))
     return out
 
 
@@ -113,14 +113,14 @@ def compare(expected: dict, exchange: dict, inflight: set, bot_open: set | None,
     return out
 
 
-async def fetch_exchange(broker, expired: set | None = None) -> tuple[dict, list]:
+async def fetch_exchange(broker, expired: dict | None = None) -> tuple[dict, list]:
     d = await broker._req("GET", "/v1/portfolio/positions")
     o = await broker._req("GET", "/v1/orders/open")
     orders = o.get("orders") if isinstance(o, dict) else o
     if not isinstance(orders, list):
         orders = next((v for v in o.values() if isinstance(v, list)), []) if isinstance(o, dict) else []
     if expired is not None:
-        expired |= parse_expired(d)
+        expired.update(parse_expired(d))
     return parse_positions(d), orders
 
 
@@ -148,9 +148,14 @@ class Reconciler:
             slug, purpose = v if isinstance(v, tuple) else (v, "")
             if purpose != "lock":
                 inflight.add(slug)
-        expired: set = set()
+        expired: dict = {}
         exch, exch_open = await fetch_exchange(self.broker, expired)
-        inflight |= expired                          # the exchange itself says: settling
+        for slug, q in expired.items():              # the exchange itself says: settling
+            want = expected.get(slug)
+            if want is None or abs(q) <= TOL or abs(q - want) <= 0.005:
+                inflight.add(slug)                   # past positions / quantities agree
+            else:
+                exch[slug] = q                       # settling, but not what the bot booked: a mismatch
         if self.closed_fn is not None:
             for slug, q in expected.items():         # bot holds, exchange shows none: closed market?
                 if slug not in inflight and abs(exch.get(slug, 0.0)) <= TOL and abs(q) > TOL:
