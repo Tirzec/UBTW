@@ -356,36 +356,59 @@ def check_risk(cfg: dict, buying_power: float | None) -> list[Check]:
                              ("sports", sc.get("risk", {}) or {}, (sc.get("entry", {}) or {}).get("stake_usd"))):
         p = []
         from .trading.risk import OFF
-        ms = float(rc.get("max_stake_usd", 0) or 0)
+        ent = (cfg.get("trading", {}) or {}).get("entry", {}) if label == "crypto" else (cfg.get("sports", {}) or {}).get("entry", {})
+        pct = (ent or {}).get("stake_pct")
+        pct = None if pct in OFF else float(pct)
+        ms_off = rc.get("max_stake_usd") in OFF
+        ex_pct = rc.get("max_total_exposure_pct")
+        ex_pct = None if ex_pct in OFF else float(ex_pct)
+        ms = 0.0 if ms_off else float(rc.get("max_stake_usd", 0) or 0)
         dl_off = rc.get("daily_loss_limit_usd") in OFF
         cl_off = rc.get("max_consecutive_losses") in OFF
         dl = 0.0 if dl_off else float(rc.get("daily_loss_limit_usd", 0) or 0)
-        ex = float(rc.get("max_total_exposure_usd", 0) or 0)
+        ex_off = rc.get("max_total_exposure_usd") in OFF
+        ex = 0.0 if ex_off else float(rc.get("max_total_exposure_usd", 0) or 0)
         cl = 0 if cl_off else int(rc.get("max_consecutive_losses", 0) or 0)
-        for n, v in (("max_stake_usd", ms), ("max_total_exposure_usd", ex)) + \
-                ((("daily_loss_limit_usd", dl),) if not dl_off else ()):
+        checks = []
+        if not ms_off:
+            checks.append(("max_stake_usd", ms))
+        elif pct is None:
+            p.append("max_stake_usd is off but no stake_pct is set")
+        if not ex_off:
+            checks.append(("max_total_exposure_usd", ex))
+        elif ex_pct is None:
+            p.append("max_total_exposure_usd is off but no max_total_exposure_pct is set")
+        if not dl_off:
+            checks.append(("daily_loss_limit_usd", dl))
+        for n, v in checks:
             if not (v > 0 and math.isfinite(v)):
                 p.append(f"{n} must be > 0")
-        if not dl_off and ms > dl > 0:
+        if pct is not None and not 0 < pct <= 1:
+            p.append("stake_pct must be between 0 and 1")
+        if not dl_off and not ms_off and ms > dl > 0:
             p.append("max stake is larger than the daily loss limit")
-        if ms > ex > 0:
+        if not ms_off and not ex_off and ms > ex > 0:
             p.append("max stake is larger than max exposure")
         if not cl_off and not 1 <= cl <= 20:
             p.append("max_consecutive_losses should be 1-20")
-        if stake is not None and float(stake) > ms > 0:
+        if pct is None and stake not in OFF and stake is not None and not ms_off and float(stake) > ms > 0:
             p.append(f"entry stake ${stake} > max stake ${ms:g} (it will be capped)")
         out.append(Check(f"risk limits ({label})", "FAIL" if p else ("INFO" if dl_off or cl_off else "PASS"),
-                         "; ".join(p) if p else f"stake <= ${ms:g}, exposure <= ${ex:g}, daily loss limit "
+                         "; ".join(p) if p else ((f"stake {pct:.0%} of balance" if pct is not None else f"stake <= ${ms:g}")
+                         + (f", open bets <= {ex_pct:.0%} of balance" if ex_off else f", exposure <= ${ex:g}"))
+                         + ", daily loss limit "
                          + ("OFF" if dl_off else f"${dl:g}") + ", losing-streak stop "
                          + ("OFF" if cl_off else f"{cl} in a row")))
     from .trading.risk import OFF
     gd_off = rg.get("daily_loss_limit_usd") in OFF
     gd = 0.0 if gd_off else float(rg.get("daily_loss_limit_usd", 0) or 0)
-    ge = float(rg.get("max_total_exposure_usd", 0) or 0)
-    p = [] if (gd_off or gd > 0) and ge > 0 else ["risk_global limits must be > 0"]
+    ge_off = rg.get("max_total_exposure_usd") in OFF
+    ge = 0.0 if ge_off else float(rg.get("max_total_exposure_usd", 0) or 0)
+    p = [] if (gd_off or gd > 0) and (ge_off or ge > 0) else ["risk_global limits must be > 0"]
     out.append(Check("risk limits (all modules)", "FAIL" if p else ("INFO" if gd_off else "PASS"),
                      "; ".join(p) or ("daily loss limit OFF (only STOP ends trading)" if gd_off
-                                      else f"daily loss <= ${gd:g}") + f", exposure <= ${ge:g} across crypto + sports"))
+                                      else f"daily loss <= ${gd:g}")
+                     + (", combined exposure cap off (per-module % caps)" if ge_off else f", exposure <= ${ge:g} across crypto + sports")))
     if buying_power is not None and gd > 0:
         frac = gd / buying_power if buying_power else float("inf")
         st = "PASS" if frac <= 0.5 else "WARN"

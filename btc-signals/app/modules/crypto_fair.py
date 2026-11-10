@@ -213,7 +213,9 @@ class CryptoFairModule(StrategyModule):
                     continue                              # no long shots (and nothing above 93c)
                 p = fv.p_side(side)
                 edge = p - ask - fee_per_share(ask, w.fee_schedule)
-                stake = float(self.ec.get("stake_usd", 1))
+                tr = getattr(self.engine, "trader", None)
+                stake = (tr.stake_now() if tr is not None and hasattr(tr, "stake_now") else None) \
+                    or float(self.ec.get("stake_usd", 1) or 1)
                 shares = stake / ask
                 depth_bid = sum(s for px, s in bk["bids"] if px >= bid - 3 * w.tick_size)
                 if edge < need:

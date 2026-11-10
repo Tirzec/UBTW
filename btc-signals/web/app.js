@@ -270,7 +270,7 @@ function renderBot(b) {
   const need = b.paper_trades_required || 300, done = b.paper_trades_done || 0;
   $("bot-paper").textContent = mode === "paper"
     ? `Paper trades completed: ${done} / ${need} required before live mode can be enabled. Entries are post-only limit orders (0 fee); exits sell at the bid (taker fee). All P&L includes fees.`
-    : `LIVE · stake ${usd((b.settings || {}).stake)} · TP +${pct((b.settings || {}).take_profit_pct, 0)} / SL -${pct((b.settings || {}).stop_loss_pct, 0)}`;
+    : `LIVE · stake ${(b.settings || {}).stake_pct ? pct((b.settings || {}).stake_pct, 0) + " of balance (" + usd((b.settings || {}).stake) + " now)" : usd((b.settings || {}).stake)} · no automatic stops: only STOP ends trading`;
 }
 
 function renderFair(b) {

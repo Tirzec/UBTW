@@ -171,7 +171,8 @@ trading:
   balance_check_s: 30
   strategy: fair_value             # settlement-math strategy (app/modules/crypto_fair.py)
   entry:
-    stake_usd: 1                   # per fair-value trade
+    stake_pct: 0.10                # each fair-value trade = 10% of current buying power (user 2026-11-10)
+    stake_usd: off                 # (fixed-dollar stake, used only if stake_pct is off)
     order_timeout_s: 10            # cancel an unfilled limit entry after 10 s
     reentry_cooldown_s: 20
     max_entries_per_window: 1      # one fair-value position per window
@@ -192,11 +193,12 @@ trading:
     exit_slippage_ticks: 0         # sell limit = best bid (never below it, never into an empty book)
     exit_order_timeout_s: 3
   risk:
-    max_stake_usd: 1
+    max_stake_usd: off             # no fixed $ cap: the 10% stake scales with the balance (was $1)
     daily_loss_limit_usd: off      # user's choice 2026-11-10: no automatic stops - only STOP ends trading
     max_consecutive_losses: off    # (was: $10/day, 4 losses in a row -> stop for the day)
     losing_streak_action: stop_for_day   # ... stop for the rest of the day (auto-resume after midnight)
-    max_total_exposure_usd: 5
+    max_total_exposure_usd: off    # open positions + orders <= 50% of buying power instead of a fixed $5
+    max_total_exposure_pct: 0.50
     min_wallet_balance_usd: off    # no halt on low balance: entries are just skipped while buying power < stake
     max_api_errors: 3              # this many errors...
     api_error_window_s: 300        # ...within this window -> pause
@@ -254,7 +256,7 @@ modules:
 
 risk_global:                       # across ALL modules
   daily_loss_limit_usd: off      # no combined daily stop either
-  max_total_exposure_usd: 5
+  max_total_exposure_usd: off    # per-module % caps apply
 
 sports:                            # Polymarket US sports (needs venue: polymarket_us)
   enabled: true

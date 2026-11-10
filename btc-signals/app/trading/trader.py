@@ -98,7 +98,7 @@ class AutoTrader:
         self._tick_last: dict[int, tuple] = {}          # position id -> (ts, bid, decision) last trace row
         self._latency: list = []                        # recent exit latencies (ms)
         self._latency_alerted = 0.0
-        self._last_balance_check = 0.0
+        self._last_balance_check = -1e18
         self._last_hb = 0.0
         self._task: asyncio.Task | None = None
         self.started = time.time()
@@ -285,6 +285,20 @@ class AutoTrader:
                 self._api_error("balance", e)
 
     # ------------------------------------------------------------ entries
+    def stake_now(self, sig=None) -> float | None:
+        """Dollars for the next entry: trading.entry.stake_pct of current buying power if set (e.g. 10%),
+        else the fixed stake_usd; never above risk.max_stake_usd unless that is 'off'."""
+        pct = self.ec.get("stake_pct")
+        if pct not in (None, False, "off"):
+            if self.last_balance is None:
+                return None
+            stake = float(pct) * float(self.last_balance)
+        else:
+            stake = float((sig.stake_usd if sig is not None and sig.stake_usd else None) or self.ec.get("stake_usd", 5))
+        if self.risk.max_stake is not None:
+            stake = min(stake, self.risk.max_stake)
+        return round(stake, 2)
+
     def _exposure(self) -> float:
         """USDC at risk: unfilled entry orders + cost basis of shares still held."""
         tot = 0.0
@@ -310,7 +324,12 @@ class AutoTrader:
         m = self.module.market(sig.market_id)
         if m is None or (m.entry_deadline is not None and now >= m.entry_deadline):
             return
-        stake = min(float(sig.stake_usd or self.ec.get("stake_usd", 5)), self.risk.max_stake)
+        stake = self.stake_now(sig)
+        if stake is None:
+            self.status_note = f"{sig.label} {sig.side} signal skipped: balance not known yet (stake is a % of it)"
+            return
+        if self.risk.max_exposure_pct is not None and self.last_balance is not None:
+            self.risk.max_exposure = self.risk.max_exposure_pct * self.last_balance
         active = self.store.active_positions()
         blockers = self.risk.entry_blockers(now=now, stake=stake, open_exposure=self._exposure(),
                                             window_busy=self._window_busy(sig.market_id, now),
@@ -810,7 +829,7 @@ class AutoTrader:
             "paper_trades_required": self.min_paper,
             "strategy_stats": self._strategy_stats(closed),
             "paper_count_from": self.paper_since,
-            "settings": {"stake": min(float(self.ec.get("stake_usd", 5)), self.risk.max_stake),
+            "settings": {"stake": self.stake_now(), "stake_pct": self.ec.get("stake_pct"),
                          "order_style": self.ec.get("order_style", "maker"),
                          "take_profit_pct": float(self.xc.get("take_profit_pct", 0.08)),
                          "stop_loss_pct": float(self.xc.get("stop_loss_pct", 0.10))},

@@ -546,3 +546,35 @@ def test_profit_lock_price_is_entry_plus_10c_capped_at_96c(tmp_path):
         assert p["status"] == "closed" and p["exit_trigger"] == "profit_lock"
         assert p["pnl"] == pytest.approx(p["shares"] * 0.10)
     asyncio.run(run())
+
+
+def test_stake_is_10_percent_of_balance_and_exposure_half_of_it(tmp_path):
+    import copy
+    cfg = copy.deepcopy(TC)
+    cfg["trading"]["entry"].update(stake_pct=0.10, stake_usd=False)
+    cfg["trading"]["risk"] = {**R, "max_stake_usd": "off", "max_total_exposure_usd": "off",
+                              "max_total_exposure_pct": 0.5}
+    e = FakeEngine(tmp_path, int(time.time()) - 60)
+    t = AutoTrader(e, cfg, PaperBroker(e.clob.store.get, e.clob.store.trades_since, lambda x: SCHED),
+                   TradeStore(e.db, "paper"))
+    assert t.stake_now() is None                                     # balance unknown: no entry
+    t.last_balance = 5.85
+    assert t.stake_now() == 0.58
+    t.last_balance = 250.0
+    assert t.stake_now() == 25.0                                     # no fixed $1 cap any more
+    t.risk.max_exposure = t.risk.max_exposure_pct * 6.0              # what _maybe_enter sets: 50% of $6
+    blk = t.risk.entry_blockers(now=time.time(), stake=0.6, open_exposure=2.6, window_busy=False, degraded=False)
+    assert any("exposure" in b for b in blk)
+    assert t.risk.entry_blockers(now=time.time(), stake=0.6, open_exposure=2.0, window_busy=False, degraded=False) == []
+
+    async def run():                                                 # end to end: entry sized at 10% of $1000
+        e.book("UP", 0.50, 0.54)
+        e.signal("UP", 0.70)
+        t.risk.max_exposure_pct = None
+        t.risk.max_exposure = None
+        t.last_balance = None
+        await t.tick(time.time())                                    # first tick reads the balance, then enters
+        p, = t.store.active_positions()
+        o = t.broker.orders[p["entry_order"]]
+        assert abs(o.size * o.price - 100.0) < 1.0
+    asyncio.run(run())

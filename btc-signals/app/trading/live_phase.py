@@ -28,14 +28,18 @@ def apply_phase1(cfg: dict) -> dict:
     sc = cfg.setdefault("sports", {})
     rg = cfg.setdefault("risk_global", {})
     for conf in (tc.setdefault("risk", {}), sc.setdefault("risk", {})):
-        conf["max_stake_usd"] = min(float(conf.get("max_stake_usd", PHASE1_MAX_STAKE_USD)), PHASE1_MAX_STAKE_USD)
+        if conf.get("max_stake_usd", PHASE1_MAX_STAKE_USD) in OFF:
+            conf["max_stake_usd"] = "off"               # stake set as a % of balance by the user
+        else:
+            conf["max_stake_usd"] = min(float(conf.get("max_stake_usd", PHASE1_MAX_STAKE_USD)), PHASE1_MAX_STAKE_USD)
         if conf.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD) in OFF:
             conf["daily_loss_limit_usd"] = "off"        # switched off by the user
         else:
             conf["daily_loss_limit_usd"] = min(float(conf.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD)),
                                                PHASE1_MAX_DAILY_LOSS_USD)
     for entry in (tc.setdefault("entry", {}), sc.setdefault("entry", {})):
-        entry["stake_usd"] = min(float(entry.get("stake_usd", PHASE1_MAX_STAKE_USD)), PHASE1_MAX_STAKE_USD)
+        if entry.get("stake_usd") not in OFF:
+            entry["stake_usd"] = min(float(entry.get("stake_usd", PHASE1_MAX_STAKE_USD)), PHASE1_MAX_STAKE_USD)
     if rg.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD) in OFF:
         rg["daily_loss_limit_usd"] = "off"
     else:

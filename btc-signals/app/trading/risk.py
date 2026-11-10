@@ -50,12 +50,13 @@ def limit(conf: dict, key: str, default, cast=float):
 
 class RiskManager:
     def __init__(self, conf: dict, state: RiskState | None = None):
-        self.max_stake = float(conf.get("max_stake_usd", 5))
+        self.max_stake = limit(conf, "max_stake_usd", 5)
         self.daily_loss_limit = limit(conf, "daily_loss_limit_usd", 25)
         self.max_consecutive = limit(conf, "max_consecutive_losses", 5, int)
         # "pause" (halt until Resume) or "stop_for_day" (no entries until local midnight, then automatic)
         self.streak_action = str(conf.get("losing_streak_action", "pause"))
-        self.max_exposure = float(conf.get("max_total_exposure_usd", 15))
+        self.max_exposure = limit(conf, "max_total_exposure_usd", 15)
+        self.max_exposure_pct = limit(conf, "max_total_exposure_pct", None)     # share of buying power
         self.min_balance = limit(conf, "min_wallet_balance_usd", 10)
         self.max_api_errors = int(conf.get("max_api_errors", 3))
         self.api_error_window_s = float(conf.get("api_error_window_s", 300))
@@ -138,10 +139,10 @@ class RiskManager:
             out.append("Polymarket matching engine maintenance")
         if degraded:
             out.append("degraded data")
-        if stake > self.max_stake + 1e-9:
+        if self.max_stake is not None and stake > self.max_stake + 1e-9:
             out.append(f"stake ${stake:.2f} > max ${self.max_stake:g}")
-        if open_exposure + stake > self.max_exposure + 1e-9:
-            out.append(f"exposure ${open_exposure:.2f} + ${stake:.2f} > max ${self.max_exposure:g}")
+        if self.max_exposure is not None and open_exposure + stake > self.max_exposure + 1e-9:
+            out.append(f"exposure ${open_exposure:.2f} + ${stake:.2f} > max ${self.max_exposure:.2f}")
         if window_busy:
             out.append("already have a position/order in this window")
         return out
@@ -169,7 +170,7 @@ class GlobalRisk:
     def __init__(self, conf: dict | None = None, trades_today_fn=None):
         conf = conf or {}
         self.daily_loss_limit = limit(conf, "daily_loss_limit_usd", 40)
-        self.max_exposure = float(conf.get("max_total_exposure_usd", 60))
+        self.max_exposure = limit(conf, "max_total_exposure_usd", 60)
         self.max_trades_per_day = conf.get("max_trades_per_day")      # set by the live phase
         self.trades_today_fn = trades_today_fn
         self.traders: list = []
@@ -193,7 +194,7 @@ class GlobalRisk:
         if self.daily_loss_limit is not None and pnl <= -self.daily_loss_limit:
             out.append(f"combined daily loss {pnl:+.2f} hit the global limit -{self.daily_loss_limit:g}")
         exp = self.exposure()
-        if exp + stake > self.max_exposure + 1e-9:
+        if self.max_exposure is not None and exp + stake > self.max_exposure + 1e-9:
             out.append(f"total exposure ${exp:.2f} + ${stake:.2f} > global max ${self.max_exposure:g}")
         if self.max_trades_per_day is not None and self.trades_today_fn is not None:
             n = self.trades_today_fn()
