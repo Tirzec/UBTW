@@ -10,6 +10,7 @@ Set-Location $root
 $vpy = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $vpy)) { Write-Host "Run .\windows\setup.ps1 first." -ForegroundColor Red; exit 1 }
 
+. (Join-Path $PSScriptRoot "bot-procs.ps1")
 $pidFile = Join-Path $root "data\bot.pid"
 if (Test-Path $pidFile) {
     $old = (Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -21,6 +22,8 @@ if (Test-Path $pidFile) {
 }
 Remove-Item $pidFile -ErrorAction SilentlyContinue        # stale file from a crash / power cut
 New-Item -ItemType Directory -Force (Join-Path $root "data") | Out-Null
+# an older start that never got going (e.g. hidden, waiting for the LIVE phrase) blocks every new start
+Stop-StuckBotProcesses $root "" | Out-Null
 $appArgs = "-m app.main"
 # LIVE mode asks you to type a confirmation phrase, which a hidden window can't show: open a visible one
 if (-not $Visible) {
@@ -46,8 +49,17 @@ if ($Visible) {
 
 # Hidden console of its own, so closing this PowerShell window does not stop the bot.
 $log = Join-Path $root "data\console.log"
+if (Test-Path $log) {
+    try {
+        Remove-Item $log -ErrorAction Stop                 # so the log below is from THIS start, never an old one
+    } catch {
+        Write-Host "data\console.log is in use by another program, so the bot can't write its log." -ForegroundColor Red
+        Write-Host "Close anything that has it open (or restart the computer), then run start-bot again."
+        exit 1
+    }
+}
 Start-Process -FilePath "cmd.exe" -WorkingDirectory $root -WindowStyle Hidden `
-    -ArgumentList "/c", "`"`"$vpy`" $appArgs --no-browser > `"$log`" 2>&1`""
+    -ArgumentList "/c", "`"`"$vpy`" $appArgs --no-browser --background > `"$log`" 2>&1`""
 Write-Host "Starting in the background ..."
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
@@ -59,7 +71,8 @@ for ($i = 0; $i -lt 30; $i++) {
 Start-Sleep -Seconds 3
 if (-not (Test-Path $pidFile)) {
     Write-Host "The bot did not start. Last lines of data\console.log:" -ForegroundColor Red
-    Get-Content $log -Tail 25 -ErrorAction SilentlyContinue
+    if (Test-Path $log) { Get-Content $log -Tail 25 -ErrorAction SilentlyContinue }
+    else { Write-Host "(no log was written: run .\windows\start-bot.bat -Visible to see the error)" }
     exit 1
 }
 $botPid = Get-Content $pidFile | Select-Object -First 1

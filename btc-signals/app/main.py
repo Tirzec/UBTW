@@ -176,6 +176,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--no-keep-awake", action="store_true",
                     help="allow the computer to idle-sleep while the bot runs")
     ap.add_argument("--no-browser", action="store_true", help="don't open the dashboard in a browser")
+    ap.add_argument("--background", action="store_true",
+                    help="started without a visible window (windows\\start-bot): nobody can type the LIVE "
+                         "confirmation, so LIVE mode refuses to start instead of waiting forever")
     args = ap.parse_args(argv)
 
     from .console import safe_console
@@ -193,6 +196,10 @@ def main(argv: list[str] | None = None) -> None:
     tc = cfg.get("trading", {}) or {}
     if tc.get("enabled", True) and tc.get("mode", "paper") == "live":
         from .trading.live_gate import check_live_gates
+        if args.background:
+            raise SystemExit("LIVE mode needs you to type the confirmation, which a background window can't "
+                             "show. Start it with:  windows\\start-bot.bat -Visible   (or set trading.mode: "
+                             "paper in config.yaml).")
         cfg["_live_confirmed"] = check_live_gates(
             cfg, str(resolve_path(cfg, cfg.get("db_path", "data/signals.db"))))
         print(f"\n  *** LIVE TRADING ENABLED on {cfg.get('venue', 'polymarket_intl')} - real orders "

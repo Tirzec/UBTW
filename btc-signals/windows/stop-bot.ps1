@@ -27,4 +27,8 @@ if (Test-Path $pidFile) {
 } else {
     Write-Host "No running bot found (no data\bot.pid)."
 }
+# also end any bot process that never finished starting (no data\bot.pid: e.g. an old background start
+# waiting for the LIVE phrase). Such a process never got past its startup checks, so it holds no orders.
+. (Join-Path $PSScriptRoot "bot-procs.ps1")
+Stop-StuckBotProcesses $root "" | Out-Null
 Write-Host "Open positions were left as they are; check them in the Polymarket app."
