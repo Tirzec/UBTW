@@ -144,7 +144,7 @@ class CopyTradeModule(StrategyModule):
             try:
                 await self._load_market(p["slug"])
             except Exception as e:  # noqa: BLE001
-                log.warning("copytrade: could not load %s at startup: %s", p["slug"], e)
+                log.warning("copytrade: could not load %s at startup: %s", p["slug"], repr(e))
             if p.get("copy_resolve_ts"):
                 self.meta.setdefault(p["slug"], {})["resolve_ts"] = p["copy_resolve_ts"]
         self.watcher.catchup = catchup                 # their sells while we were stopped still count
@@ -530,7 +530,7 @@ class CopyTradeModule(StrategyModule):
                         self._last_settle_check[slug] = now
                         await self.refresh_settlement(slug)      # catches markets that resolve early
                 except Exception as e:  # noqa: BLE001 - never let one market stop the loop
-                    log.warning("copytrade book %s: %s", slug, e)
+                    log.warning("copytrade book %s: %s", slug, repr(e))
             await asyncio.sleep(float(self.cc.get("book_poll_s", 4)))
 
     def trader_stats(self) -> dict:

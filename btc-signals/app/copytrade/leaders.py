@@ -158,7 +158,7 @@ class LeaderWatcher:
             t.holding_after = left
             t.sell_fraction = min(1.0, t.size / (t.size + left)) if t.size + left > 0 else 1.0
         except (httpx.HTTPError, ValueError) as e:
-            log.warning("positions for %s: %s", t.name, e)
+            log.warning("positions for %s: %s", t.name, repr(e))
             t.sell_fraction = None              # unknown: the copier keeps holding (never dumps blindly)
 
     async def run(self, on_trade) -> None:
@@ -171,5 +171,5 @@ class LeaderWatcher:
                     self.errors.pop(w, None)
                 except Exception as e:  # noqa: BLE001 - keep watching every trader whatever happens
                     self.errors[w] = f"{type(e).__name__}: {e}"[:200]
-                    log.warning("leader poll %s: %s", w[:10], e)
+                    log.warning("leader poll %s: %s", w[:10], repr(e))
             await asyncio.sleep(self.interval_s)
