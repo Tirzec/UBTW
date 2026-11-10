@@ -11,6 +11,7 @@ Rate limits (docs, per IP): /v2 800 req/10 s, /v2/trades 300 req/10 s. We pace f
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any, Iterator, Optional
 
@@ -22,10 +23,11 @@ GAMMA = "https://gamma-api.polymarket.com"
 
 
 class IntlData:
-    def __init__(self, client: Optional[httpx.Client] = None, min_gap_s: float = 0.06, timeout: float = 20):
+    def __init__(self, client: Optional[httpx.Client] = None, min_gap_s: float = 0.05, timeout: float = 20):
         self.c = client or httpx.Client(timeout=timeout, headers={"User-Agent": "btc-signals/1.0"})
-        self.min_gap = min_gap_s                     # ~16 req/s max, well under the documented limits
+        self.min_gap = min_gap_s                     # <= 20 req/s in total (all threads), under the documented limits
         self._last = 0.0
+        self._pace = threading.Lock()                # shared by worker threads: the pacing is global
         self._market_cache: dict[str, Optional[dict]] = {}
         self._event_cache: dict[str, Optional[dict]] = {}
         self.calls = 0
@@ -35,11 +37,12 @@ class IntlData:
         params = dict(params or {})
         params["_"] = time.time_ns()                 # bust the 300 s CDN cache
         for i in range(tries):
-            wait = self.min_gap - (time.time() - self._last)
-            if wait > 0:
-                time.sleep(wait)
-            self._last = time.time()
-            self.calls += 1
+            with self._pace:
+                wait = self.min_gap - (time.time() - self._last)
+                if wait > 0:
+                    time.sleep(wait)
+                self._last = time.time()
+                self.calls += 1
             try:
                 r = self.c.get(url, params=params)
             except httpx.HTTPError as e:

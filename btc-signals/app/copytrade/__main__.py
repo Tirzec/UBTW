@@ -103,90 +103,160 @@ def on_us(api: IntlData, cache: dict, event_slug: str) -> bool:
     return cache[event_slug]
 
 
+SCAN_DIR = ROOT / "data" / "copy_scan"          # checkpoints: a long scan can resume where it stopped
+
+
+def _score_one(api, p, since, split, now):
+    w = p["wallet"]
+    fills, trunc = api.user_trades(w, start=int(since), max_rows=20000)
+    finished = api.closed_positions(w, start=int(since)) + api.resolved_open_positions(w, start=int(since))
+    pts = api.user_pnl(w, interval="all", fidelity="1d")
+    s = score_trader(wallet=w, name=p["name"], fills=fills, truncated=trunc, closed=finished, pnl_points=pts,
+                     since=since, now=split)
+    r = score_trader(wallet=w, name=p["name"], fills=fills, truncated=trunc, closed=finished, pnl_points=pts,
+                     since=split, now=now, min_trades=0)
+    s["recent"] = {k: r[k] for k in ("realized_pnl", "roi", "win_rate", "entries", "max_drawdown", "curve_pnl")}
+    s["_all_entries"] = group_fills([f for f in fills if (f.get("timestamp") or 0) >= since])
+    s["lb_board"] = p["lb_board"]
+    s.pop("_entries", None)
+    return s
+
+
+def _backtest_one(api, pricer, us_cache, s, since, split, now, max_entries):
+    ents = s["_all_entries"]
+    old_buys = [e for e in ents if e["side"] == "BUY" and e["t"] < split]
+    start = old_buys[-max_entries]["t"] if len(old_buys) > max_entries else since
+    kw = dict(price_after=pricer.price_after, market_info=pricer.market_info, wallet=s["wallet"], now=now)
+    bt = backtest_copy(ents, copy_from=start, copy_to=split, **kw)
+    new_buys = [e for e in ents if e["side"] == "BUY" and e["t"] >= split]
+    start_r = new_buys[-max_entries]["t"] if len(new_buys) > max_entries else split
+    bt_recent = backtest_copy(ents, copy_from=start_r, copy_to=now + 1, **kw)
+    us_ents = [e for e in ents if on_us(api, us_cache, e.get("event_slug"))]
+    bt_us = backtest_copy(us_ents, copy_from=start, copy_to=now + 1, **kw) if us_ents else None
+    out = {"backtest": {str(k): v for k, v in bt.items()},
+           "backtest_recent": {str(k): v for k, v in bt_recent.items()},
+           "backtest_us_only": None if bt_us is None else {str(k): v for k, v in bt_us.items()},
+           "us_match": {"buys": len([e for e in ents if e["side"] == "BUY"]),
+                        "on_us": len([e for e in us_ents if e["side"] == "BUY"])}}
+    b10, b30 = bt[10], bt[30]
+    out["copy_ok"] = (b10["pnl"] or 0) > 0 and (b30["pnl"] or 0) > 0 and b30["markets"] >= 20
+    return out
+
+
 def find_candidates(*, days: int = 90, recent_days: int = 30, pool: int = 150, n_backtest: int = 25,
-                    top: int = 10, max_entries: int = 300, log=print) -> dict:
+                    top: int = 10, max_entries: int = 300, workers: int = 6, resume: bool = True,
+                    log=print) -> dict:
     """Out-of-sample by design: traders are drawn from the CURRENT monthly leaderboards, so eligibility and the
-    keep/drop backtest use the EARLIER period [now-days, now-recent_days]; the recent month is reported only."""
+    keep/drop backtest use the EARLIER period [now-days, now-recent_days]; the recent month is reported only.
+    Checkpointed in data/copy_scan/: a scan stopped part-way resumes (scores up to 24 h old are reused)."""
+    import pickle
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     api = IntlData()
-    now = time.time()
-    since = now - days * 86400
-    split = now - recent_days * 86400
-    seen, people = set(), []
-    boards = [("month", None, "PNL", pool)] + [("month", c, "PNL", max(20, pool // 3)) for c in CATEGORIES] + \
-             [("month", None, "VOLUME", pool // 2)]
-    for period, cat, sort_by, n in boards:
+    SCAN_DIR.mkdir(parents=True, exist_ok=True)
+    ck = SCAN_DIR / "scored.pkl"
+    state = None
+    if resume and ck.exists():
         try:
-            rows = api.leaderboard(period=period, sort_by=sort_by, category=cat, n=n)
-        except Exception as e:  # noqa: BLE001 - one board failing must not stop the search
-            log(f"leaderboard {cat or 'overall'}/{sort_by}: {e}")
-            rows = []
-        for row in rows:
-            w = (row.get("user_id") or "").lower()
-            if w and w not in seen:
-                seen.add(w)
-                people.append({"wallet": w, "name": row.get("user_name") or w[:10], "lb_pnl": row.get("pnl"),
-                               "lb_board": f"{cat or 'overall'}/{sort_by.lower()}"})
-    log(f"{len(people)} traders from the monthly leaderboards (overall P&L + volume, {', '.join(CATEGORIES)})")
-    scored = []
-    for i, p in enumerate(people, 1):
-        w = p["wallet"]
-        try:
-            fills, trunc = api.user_trades(w, start=int(since), max_rows=20000)
-            finished = api.closed_positions(w, start=int(since)) + api.resolved_open_positions(w, start=int(since))
-            pts = api.user_pnl(w, interval="all", fidelity="1d")
-        except Exception as e:  # noqa: BLE001
-            log(f"  [{i}/{len(people)}] {p['name']}: data error {e}")
-            continue
-        s = score_trader(wallet=w, name=p["name"], fills=fills, truncated=trunc, closed=finished, pnl_points=pts,
-                         since=since, now=split)
-        r = score_trader(wallet=w, name=p["name"], fills=fills, truncated=trunc, closed=finished, pnl_points=pts,
-                         since=split, now=now, min_trades=0)
-        s["recent"] = {k: r[k] for k in ("realized_pnl", "roi", "win_rate", "entries", "max_drawdown", "curve_pnl")}
-        s["_all_entries"] = group_fills([f for f in fills if (f.get("timestamp") or 0) >= since])
-        s["lb_board"] = p["lb_board"]
-        scored.append(s)
-        log(f"  [{i}/{len(people)}] {p['name'][:20]:20s} " + ("OK " if not s["excluded"] else "-- " + s["excluded"][0]))
+            state = pickle.loads(ck.read_bytes())
+            if time.time() - state["now"] > 86400 or state["days"] != days or state["recent_days"] != recent_days \
+                    or state.get("pool_arg") != pool:
+                state = None
+        except Exception:  # noqa: BLE001
+            state = None
+    if state is None:
+        for f in SCAN_DIR.glob("bt_*.json"):
+            f.unlink()
+        now = time.time()
+        since, split = now - days * 86400, now - recent_days * 86400
+        seen, people = set(), []
+        boards = [("month", None, "PNL", pool)] + [("month", c, "PNL", max(20, pool // 3)) for c in CATEGORIES] + \
+                 [("month", None, "VOLUME", pool // 2)]
+        for period, cat, sort_by, n in boards:
+            try:
+                rows = api.leaderboard(period=period, sort_by=sort_by, category=cat, n=n)
+            except Exception as e:  # noqa: BLE001 - one board failing must not stop the search
+                log(f"leaderboard {cat or 'overall'}/{sort_by}: {e}")
+                rows = []
+            for row in rows:
+                w = (row.get("user_id") or "").lower()
+                if w and w not in seen:
+                    seen.add(w)
+                    people.append({"wallet": w, "name": row.get("user_name") or w[:10], "lb_pnl": row.get("pnl"),
+                                   "lb_board": f"{cat or 'overall'}/{sort_by.lower()}"})
+        log(f"{len(people)} traders from the monthly leaderboards (overall P&L + volume, {', '.join(CATEGORIES)})")
+        scored = []
+        with ThreadPoolExecutor(workers) as ex:
+            futs = {ex.submit(_score_one, api, p, since, split, now): p for p in people}
+            for i, fu in enumerate(as_completed(futs), 1):
+                p = futs[fu]
+                try:
+                    s = fu.result()
+                except Exception as e:  # noqa: BLE001
+                    log(f"  [{i}/{len(people)}] {p['name']}: data error {e}")
+                    continue
+                scored.append(s)
+                log(f"  [{i}/{len(people)}] {p['name'][:20]:20s} " +
+                    ("OK " if not s["excluded"] else "-- " + s["excluded"][0]))
+        state = {"now": now, "days": days, "recent_days": recent_days, "pool": len(people), "pool_arg": pool,
+                 "scored": scored}
+        ck.write_bytes(pickle.dumps(state))
+    else:
+        log(f"resuming: reusing scores of {len(state['scored'])} traders from "
+            f"{(time.time() - state['now']) / 3600:.1f} h ago")
+    now, scored = state["now"], state["scored"]
+    since, split = now - days * 86400, now - recent_days * 86400
     eligible = [s for s in scored if not s["excluded"]]
     eligible.sort(key=lambda s: (s["curve_pnl"] or s["realized_pnl"]) / max(s["cost"], 1.0) * min(1.0, s["entries"] / 200),
                   reverse=True)
+    todo = eligible[:n_backtest]
     log(f"{len(eligible)} eligible after exclusions (scored on days {days}..{recent_days} ago); "
-        f"backtesting the top {min(n_backtest, len(eligible))}")
+        f"backtesting the top {len(todo)}")
     pricer, us_cache = Pricer(api), {}
+
+    def result(final_list):
+        keep = sorted([s for s in final_list if s["copy_ok"]], key=lambda s: s["backtest"]["30"]["pnl_lb"] or -1e9,
+                      reverse=True)
+        strip = lambda s: {k: v for k, v in s.items() if not k.startswith("_")}  # noqa: E731
+        res = {"generated": now, "days": days, "recent_days": recent_days, "api_calls": api.calls,
+               "pool": state["pool"], "eligible": len(eligible), "backtested": len(final_list),
+               "planned_backtests": len(todo), "shortlist": [strip(s) for s in keep[:top]],
+               "dropped_after_backtest": [strip(s) for s in final_list if not s["copy_ok"]],
+               "excluded": [{"wallet": s["wallet"], "name": s["name"], "why": s["excluded"]}
+                            for s in scored if s["excluded"]]}
+        CANDIDATES.parent.mkdir(parents=True, exist_ok=True)
+        CANDIDATES.write_text(json.dumps(res, indent=1, default=str))   # partial results stay readable
+        return res
+
     final = []
-    for s in eligible[:n_backtest]:
-        ents = s["_all_entries"]
-        old_buys = [e for e in ents if e["side"] == "BUY" and e["t"] < split]
-        start = old_buys[-max_entries]["t"] if len(old_buys) > max_entries else since
-        kw = dict(price_after=pricer.price_after, market_info=pricer.market_info, wallet=s["wallet"], now=now)
-        bt = backtest_copy(ents, copy_from=start, copy_to=split, **kw)
-        new_buys = [e for e in ents if e["side"] == "BUY" and e["t"] >= split]
-        start_r = new_buys[-max_entries]["t"] if len(new_buys) > max_entries else split
-        bt_recent = backtest_copy(ents, copy_from=start_r, copy_to=now + 1, **kw)
-        us_ents = [e for e in ents if on_us(api, us_cache, e.get("event_slug"))]
-        bt_us = backtest_copy(us_ents, copy_from=start, copy_to=now + 1, **kw) if us_ents else None
-        s["backtest"] = {str(k): v for k, v in bt.items()}
-        s["backtest_recent"] = {str(k): v for k, v in bt_recent.items()}
-        s["backtest_us_only"] = None if bt_us is None else {str(k): v for k, v in bt_us.items()}
-        n_buys = len([e for e in ents if e["side"] == "BUY"])
-        s["us_match"] = {"buys": n_buys, "on_us": len([e for e in us_ents if e["side"] == "BUY"])}
-        b10, b30 = bt[10], bt[30]
-        ok = (b10["pnl"] or 0) > 0 and (b30["pnl"] or 0) > 0 and b30["markets"] >= 20
-        s["copy_ok"] = ok
+
+    def done(s, out):
+        s.update(out)
+        b10, b30, rc = s["backtest"]["10"], s["backtest"]["30"], s["backtest_recent"]["30"]
         log(f"  backtest {s['name'][:20]:20s} 10s {b10['pnl']:+.2f} / 30s {b30['pnl']:+.2f} on {b30['copied']} copies "
             f"in {b30['markets']} markets (lower bound {b30['pnl_lb']}) | recent month 30s "
-            f"{bt_recent[30]['pnl']:+.2f} -> {'KEEP' if ok else 'drop'}")
+            f"{rc['pnl']:+.2f} -> {'KEEP' if s['copy_ok'] else 'drop'}")
         final.append(s)
-    keep = sorted([s for s in final if s["copy_ok"]], key=lambda s: s["backtest"]["30"]["pnl_lb"] or -1e9, reverse=True)
-    for s in scored:
-        s.pop("_entries", None)
-        s.pop("_all_entries", None)
-    res = {"generated": now, "days": days, "recent_days": recent_days, "api_calls": api.calls, "pool": len(people),
-           "eligible": len(eligible), "backtested": len(final), "shortlist": keep[:top],
-           "dropped_after_backtest": [s for s in final if not s["copy_ok"]],
-           "excluded": [{"wallet": s["wallet"], "name": s["name"], "why": s["excluded"]} for s in scored if s["excluded"]]}
-    CANDIDATES.parent.mkdir(parents=True, exist_ok=True)
-    CANDIDATES.write_text(json.dumps(res, indent=1, default=str))
-    return res
+        result(final)
+
+    pending = []
+    for s in todo:
+        f = SCAN_DIR / f"bt_{s['wallet']}.json"
+        if f.exists():
+            done(s, json.loads(f.read_text()))
+        else:
+            pending.append(s)
+    with ThreadPoolExecutor(workers) as ex:
+        futs = {ex.submit(_backtest_one, api, pricer, us_cache, s, since, split, now, max_entries): s for s in pending}
+        for fu in as_completed(futs):
+            s = futs[fu]
+            try:
+                out = fu.result()
+            except Exception as e:  # noqa: BLE001
+                log(f"  backtest {s['name']}: error {e}")
+                continue
+            (SCAN_DIR / f"bt_{s['wallet']}.json").write_text(json.dumps(out, default=str))
+            done(s, out)
+    return result(final)
 
 
 def _pct(x):
@@ -196,7 +266,9 @@ def _pct(x):
 def format_shortlist(res: dict) -> str:
     rd = res.get("recent_days", 30)
     L = [f"Pool {res['pool']} traders -> {res['eligible']} eligible -> {res['backtested']} backtested -> "
-         f"{len(res['shortlist'])} still profitable copied 10 s AND 30 s late", "",
+         f"{len(res['shortlist'])} still profitable copied 10 s AND 30 s late"
+         + (f"  (PARTIAL: {res['backtested']} of {res['planned_backtests']} backtests done)"
+            if res.get("planned_backtests", res["backtested"]) > res["backtested"] else ""), "",
          f"Scored and backtested on days {res['days']}..{rd} ago (they were picked from the current month's "
          f"leaderboard, so the recent month is shown separately as a check).", ""]
     hdr = (f"{'#':>2} {'trader':16s} {'wallet':10s} {'P&L':>10s} {'ROI':>6s} {'win':>4s} {'bets':>5s} {'maxDD':>9s} "
@@ -233,12 +305,15 @@ def main(argv=None) -> None:
     ap.add_argument("--backtest", type=int, default=25)
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--max-entries", type=int, default=300)
+    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--fresh", action="store_true", help="ignore checkpoints from an earlier scan")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
     from ..console import safe_console
     safe_console()
     if a.command == "candidates":
-        res = find_candidates(days=a.days, pool=a.pool, n_backtest=a.backtest, top=a.top, max_entries=a.max_entries)
+        res = find_candidates(days=a.days, pool=a.pool, n_backtest=a.backtest, top=a.top, max_entries=a.max_entries,
+                              workers=a.workers, resume=not a.fresh)
         print("\n" + format_shortlist(res))
     elif a.command == "show":
         print(format_shortlist(json.loads(CANDIDATES.read_text())))
