@@ -39,15 +39,24 @@ class RiskState:
             "recent_api_errors": len(self.api_errors)}
 
 
+OFF = (None, False, "off", "none", "")
+
+
+def limit(conf: dict, key: str, default, cast=float):
+    """A configurable limit; 'off' (YAML: off / false / null) switches it off -> None."""
+    v = conf.get(key, default)
+    return None if v in OFF else cast(v)
+
+
 class RiskManager:
     def __init__(self, conf: dict, state: RiskState | None = None):
         self.max_stake = float(conf.get("max_stake_usd", 5))
-        self.daily_loss_limit = float(conf.get("daily_loss_limit_usd", 25))
-        self.max_consecutive = int(conf.get("max_consecutive_losses", 5))
+        self.daily_loss_limit = limit(conf, "daily_loss_limit_usd", 25)
+        self.max_consecutive = limit(conf, "max_consecutive_losses", 5, int)
         # "pause" (halt until Resume) or "stop_for_day" (no entries until local midnight, then automatic)
         self.streak_action = str(conf.get("losing_streak_action", "pause"))
         self.max_exposure = float(conf.get("max_total_exposure_usd", 15))
-        self.min_balance = float(conf.get("min_wallet_balance_usd", 10))
+        self.min_balance = limit(conf, "min_wallet_balance_usd", 10)
         self.max_api_errors = int(conf.get("max_api_errors", 3))
         self.api_error_window_s = float(conf.get("api_error_window_s", 300))
         self.state = state or RiskState()
@@ -80,12 +89,12 @@ class RiskManager:
         s.day_trades += 1
         s.consecutive_losses = s.consecutive_losses + 1 if pnl < 0 else 0
         alerts = []
-        if s.day_pnl <= -self.daily_loss_limit and not s.day_stopped_until:
+        if self.daily_loss_limit is not None and s.day_pnl <= -self.daily_loss_limit and not s.day_stopped_until:
             s.day_stopped_until = next_local_midnight(now)
             s.day_stop_reason = "loss_limit"
             alerts.append(f"Daily loss limit hit ({s.day_pnl:+.2f} <= -{self.daily_loss_limit:g}). "
                           "No new trades until tomorrow.")
-        if s.consecutive_losses >= self.max_consecutive:
+        if self.max_consecutive is not None and s.consecutive_losses >= self.max_consecutive:
             if self.streak_action == "stop_for_day":
                 if not s.day_stopped_until:
                     s.day_stopped_until = next_local_midnight(now)
@@ -107,7 +116,8 @@ class RiskManager:
         return None
 
     def check_balance(self, balance: float | None) -> str | None:
-        if balance is not None and balance < self.min_balance and not self.state.halted:
+        if self.min_balance is not None and balance is not None and balance < self.min_balance \
+                and not self.state.halted:
             self.halt(f"wallet balance ${balance:.2f} below ${self.min_balance:g}")
             return self.state.halt_reason
         return None
@@ -146,7 +156,8 @@ class RiskManager:
         s = self.state
         return {**s.to_dict(),
                 "daily_loss_limit": self.daily_loss_limit,
-                "distance_to_daily_limit": round(self.daily_loss_limit + s.day_pnl, 4),
+                "distance_to_daily_limit": (None if self.daily_loss_limit is None
+                                            else round(self.daily_loss_limit + s.day_pnl, 4)),
                 "max_stake": self.max_stake, "max_exposure": self.max_exposure,
                 "max_consecutive_losses": self.max_consecutive,
                 "day_stopped": bool(s.day_stopped_until and now < s.day_stopped_until)}
@@ -157,7 +168,7 @@ class GlobalRisk:
 
     def __init__(self, conf: dict | None = None, trades_today_fn=None):
         conf = conf or {}
-        self.daily_loss_limit = float(conf.get("daily_loss_limit_usd", 40))
+        self.daily_loss_limit = limit(conf, "daily_loss_limit_usd", 40)
         self.max_exposure = float(conf.get("max_total_exposure_usd", 60))
         self.max_trades_per_day = conf.get("max_trades_per_day")      # set by the live phase
         self.trades_today_fn = trades_today_fn
@@ -179,7 +190,7 @@ class GlobalRisk:
     def entry_blockers(self, now: float, stake: float) -> list[str]:
         out = []
         pnl = self.day_pnl(now)
-        if pnl <= -self.daily_loss_limit:
+        if self.daily_loss_limit is not None and pnl <= -self.daily_loss_limit:
             out.append(f"combined daily loss {pnl:+.2f} hit the global limit -{self.daily_loss_limit:g}")
         exp = self.exposure()
         if exp + stake > self.max_exposure + 1e-9:

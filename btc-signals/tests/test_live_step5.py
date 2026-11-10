@@ -228,3 +228,26 @@ def test_losing_streak_stops_for_the_day_then_resumes_automatically():
     for _ in range(4):
         old.record_close(-0.2, now)
     assert old.state.halted
+
+
+def test_automatic_stops_can_all_be_switched_off():
+    """User choice 2026-11-10: only STOP ends trading."""
+    from app.trading.risk import RiskManager
+    cfg = {"trading": {"risk": {"daily_loss_limit_usd": "off", "max_consecutive_losses": False,
+                                "min_wallet_balance_usd": None, "max_stake_usd": 1, "max_total_exposure_usd": 5}},
+           "risk_global": {"daily_loss_limit_usd": False, "max_total_exposure_usd": 5}}
+    phase = apply_phase1(cfg)
+    assert phase["daily_loss_limit_usd"] == "off"                     # phase-1 $10 cap switched off, not re-imposed
+    rm = RiskManager(cfg["trading"]["risk"])
+    now = time.time()
+    for _ in range(20):
+        assert rm.record_close(-1.0, now) == []                       # -$20, 20 losses in a row: no stop
+    assert not rm.state.halted and not rm.state.day_stopped_until
+    assert rm.check_balance(0.10) is None and not rm.state.halted     # low balance: no halt
+    assert rm.entry_blockers(now=now, stake=1, open_exposure=0, window_busy=False, degraded=False) == []
+    g = GlobalRisk(cfg["risk_global"])
+    g.traders.append(type("T", (), {"risk": rm, "_exposure": lambda self: 0.0})())
+    assert g.entry_blockers(now, 1.0) == []
+    assert rm.summary()["daily_loss_limit"] is None
+    # a NUMBER is still capped at $10 in phase 1 (can be switched off, never raised)
+    assert apply_phase1({"trading": {"risk": {"daily_loss_limit_usd": 50}}})["daily_loss_limit_usd"] == 10

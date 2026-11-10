@@ -113,7 +113,8 @@ class AutoTrader:
         self.risk.state.day_pnl = sum(r["pnl"] or 0 for r in rows)
         self.risk.state.day_trades = len(rows)
         st = self.risk.state
-        if st.day_stopped_until and st.day_stop_reason != "streak" and st.day_pnl > -self.risk.daily_loss_limit:
+        if st.day_stopped_until and st.day_stop_reason != "streak" and (
+                self.risk.daily_loss_limit is None or st.day_pnl > -self.risk.daily_loss_limit):
             # the daily limit was raised since the stop: today's loss is now inside it, so lift the stop
             st.day_stopped_until = 0.0
             self.store.event("risk", f"daily stop lifted: today {st.day_pnl:+.2f} is within the new limit "
@@ -315,6 +316,8 @@ class AutoTrader:
                                             window_busy=self._window_busy(sig.market_id, now),
                                             degraded=self.module.degraded())
         blockers += self.module.entry_blockers(sig, active, now)
+        if self.mode == "live" and self.last_balance is not None and self.last_balance < stake:
+            blockers.append(f"buying power ${self.last_balance:.2f} < stake ${stake:.2f}")   # skip, no halt
         if self.global_risk is not None:
             gb = self.global_risk.entry_blockers(now, stake)
             for b in gb:                         # combined loss limit / phase trade cap: tell the phone once a day
@@ -766,6 +769,8 @@ class AutoTrader:
             return
         from .summary import self_check
         sc = (self.tc.get("self_check", {}) or {})
+        if sc.get("enabled", True) in (False, "off"):
+            return
         rows = [r for r in self.store.closed_positions() if r.get("strategy") == "fair_value"]
         res = self_check(rows, after=int(sc.get("after_trades", 100)), every=int(sc.get("every", 25)),
                          max_cal_error=float(sc.get("max_calibration_error", 0.10)))

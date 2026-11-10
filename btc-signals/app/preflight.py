@@ -355,29 +355,37 @@ def check_risk(cfg: dict, buying_power: float | None) -> list[Check]:
     for label, rc, stake in (("crypto", tc.get("risk", {}) or {}, (tc.get("entry", {}) or {}).get("stake_usd")),
                              ("sports", sc.get("risk", {}) or {}, (sc.get("entry", {}) or {}).get("stake_usd"))):
         p = []
+        from .trading.risk import OFF
         ms = float(rc.get("max_stake_usd", 0) or 0)
-        dl = float(rc.get("daily_loss_limit_usd", 0) or 0)
+        dl_off = rc.get("daily_loss_limit_usd") in OFF
+        cl_off = rc.get("max_consecutive_losses") in OFF
+        dl = 0.0 if dl_off else float(rc.get("daily_loss_limit_usd", 0) or 0)
         ex = float(rc.get("max_total_exposure_usd", 0) or 0)
-        cl = int(rc.get("max_consecutive_losses", 0) or 0)
-        for n, v in (("max_stake_usd", ms), ("daily_loss_limit_usd", dl), ("max_total_exposure_usd", ex)):
+        cl = 0 if cl_off else int(rc.get("max_consecutive_losses", 0) or 0)
+        for n, v in (("max_stake_usd", ms), ("max_total_exposure_usd", ex)) + \
+                ((("daily_loss_limit_usd", dl),) if not dl_off else ()):
             if not (v > 0 and math.isfinite(v)):
                 p.append(f"{n} must be > 0")
-        if ms > dl > 0:
+        if not dl_off and ms > dl > 0:
             p.append("max stake is larger than the daily loss limit")
         if ms > ex > 0:
             p.append("max stake is larger than max exposure")
-        if not 1 <= cl <= 20:
+        if not cl_off and not 1 <= cl <= 20:
             p.append("max_consecutive_losses should be 1-20")
         if stake is not None and float(stake) > ms > 0:
             p.append(f"entry stake ${stake} > max stake ${ms:g} (it will be capped)")
-        out.append(Check(f"risk limits ({label})", "FAIL" if p else "PASS",
-                         "; ".join(p) if p else f"stake <= ${ms:g}, daily loss <= ${dl:g}, exposure <= ${ex:g}, "
-                                                f"{cl} losses in a row -> pause"))
-    gd = float(rg.get("daily_loss_limit_usd", 0) or 0)
+        out.append(Check(f"risk limits ({label})", "FAIL" if p else ("INFO" if dl_off or cl_off else "PASS"),
+                         "; ".join(p) if p else f"stake <= ${ms:g}, exposure <= ${ex:g}, daily loss limit "
+                         + ("OFF" if dl_off else f"${dl:g}") + ", losing-streak stop "
+                         + ("OFF" if cl_off else f"{cl} in a row")))
+    from .trading.risk import OFF
+    gd_off = rg.get("daily_loss_limit_usd") in OFF
+    gd = 0.0 if gd_off else float(rg.get("daily_loss_limit_usd", 0) or 0)
     ge = float(rg.get("max_total_exposure_usd", 0) or 0)
-    p = [] if gd > 0 and ge > 0 else ["risk_global limits must be > 0"]
-    out.append(Check("risk limits (all modules)", "FAIL" if p else "PASS",
-                     "; ".join(p) or f"daily loss <= ${gd:g}, exposure <= ${ge:g} across crypto + sports"))
+    p = [] if (gd_off or gd > 0) and ge > 0 else ["risk_global limits must be > 0"]
+    out.append(Check("risk limits (all modules)", "FAIL" if p else ("INFO" if gd_off else "PASS"),
+                     "; ".join(p) or ("daily loss limit OFF (only STOP ends trading)" if gd_off
+                                      else f"daily loss <= ${gd:g}") + f", exposure <= ${ge:g} across crypto + sports"))
     if buying_power is not None and gd > 0:
         frac = gd / buying_power if buying_power else float("inf")
         st = "PASS" if frac <= 0.5 else "WARN"

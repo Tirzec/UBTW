@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import time
 
+from .risk import OFF
+
 PHASE1_MAX_STAKE_USD = 1.0
 PHASE1_MAX_DAILY_LOSS_USD = 10.0
 PHASE1_MAX_TRADES_PER_DAY = 10
@@ -27,12 +29,18 @@ def apply_phase1(cfg: dict) -> dict:
     rg = cfg.setdefault("risk_global", {})
     for conf in (tc.setdefault("risk", {}), sc.setdefault("risk", {})):
         conf["max_stake_usd"] = min(float(conf.get("max_stake_usd", PHASE1_MAX_STAKE_USD)), PHASE1_MAX_STAKE_USD)
-        conf["daily_loss_limit_usd"] = min(float(conf.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD)),
-                                           PHASE1_MAX_DAILY_LOSS_USD)
+        if conf.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD) in OFF:
+            conf["daily_loss_limit_usd"] = "off"        # switched off by the user
+        else:
+            conf["daily_loss_limit_usd"] = min(float(conf.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD)),
+                                               PHASE1_MAX_DAILY_LOSS_USD)
     for entry in (tc.setdefault("entry", {}), sc.setdefault("entry", {})):
         entry["stake_usd"] = min(float(entry.get("stake_usd", PHASE1_MAX_STAKE_USD)), PHASE1_MAX_STAKE_USD)
-    rg["daily_loss_limit_usd"] = min(float(rg.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD)),
-                                     PHASE1_MAX_DAILY_LOSS_USD)
+    if rg.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD) in OFF:
+        rg["daily_loss_limit_usd"] = "off"
+    else:
+        rg["daily_loss_limit_usd"] = min(float(rg.get("daily_loss_limit_usd", PHASE1_MAX_DAILY_LOSS_USD)),
+                                         PHASE1_MAX_DAILY_LOSS_USD)
     wanted = (tc.get("live_phase1", {}) or {}).get("max_trades_per_day", PHASE1_MAX_TRADES_PER_DAY)
     if wanted in (None, False, "off", "none"):
         rg["max_trades_per_day"] = None                    # switched off by the user

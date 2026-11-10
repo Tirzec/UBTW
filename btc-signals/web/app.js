@@ -245,9 +245,9 @@ function renderBot(b) {
   const cls = (x) => (x == null ? "" : x >= 0 ? "pos" : "neg");
   $("bot-risk").innerHTML =
     cell("Today's P&L", pn(r.day_pnl), cls(r.day_pnl)) +
-    cell("To daily limit", usd(r.distance_to_daily_limit) + ` <span class="muted">of ${usd(r.daily_loss_limit, 0)}</span>`) +
+    cell("To daily limit", r.daily_loss_limit == null ? "off" : usd(r.distance_to_daily_limit) + ` <span class="muted">of ${usd(r.daily_loss_limit, 0)}</span>`) +
     cell("Today win rate", t.n ? `${pct(t.win_rate)} <span class="muted">(${t.n})</span>` : "–") +
-    cell("Losses in a row", `${r.consecutive_losses ?? 0} / ${r.max_consecutive_losses ?? "–"}`) +
+    cell("Losses in a row", `${r.consecutive_losses ?? 0}` + (r.max_consecutive_losses == null ? ' <span class="muted">(no stop)</span>' : ` / ${r.max_consecutive_losses}`)) +
     cell("Avg win / avg loss", a.n ? `${pn(a.avg_win)} / ${pn(a.avg_loss)}` : "–") +
     cell("All-time P&L", a.n ? pn(a.total_pnl) : "–", cls(a.total_pnl)) +
     cell("All-time win rate", a.n ? `${pct(a.win_rate)} <span class="muted">(${a.n})</span>` : "–") +

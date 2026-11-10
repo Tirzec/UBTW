@@ -193,14 +193,15 @@ trading:
     exit_order_timeout_s: 3
   risk:
     max_stake_usd: 1
-    daily_loss_limit_usd: 10       # then stop for the day (phase-1 hard cap is 10)
-    max_consecutive_losses: 4      # 4 losses in a row ...
+    daily_loss_limit_usd: off      # user's choice 2026-11-10: no automatic stops - only STOP ends trading
+    max_consecutive_losses: off    # (was: $10/day, 4 losses in a row -> stop for the day)
     losing_streak_action: stop_for_day   # ... stop for the rest of the day (auto-resume after midnight)
     max_total_exposure_usd: 5
-    min_wallet_balance_usd: 1      # stop trading if buying power falls below this
+    min_wallet_balance_usd: off    # no halt on low balance: entries are just skipped while buying power < stake
     max_api_errors: 3              # this many errors...
     api_error_window_s: 300        # ...within this window -> pause
   self_check:
+    enabled: off                   # user's choice 2026-11-10: report only, never pauses (was: pause after 100)
     after_trades: 100              # then every 25 trades: pause if calibration is poor or P&L < 0
     every: 25
     max_calibration_error: 0.10    # average |predicted - actual| over probability buckets
@@ -252,7 +253,7 @@ modules:
   crypto_updown: {enabled: true}
 
 risk_global:                       # across ALL modules
-  daily_loss_limit_usd: 10
+  daily_loss_limit_usd: off      # no combined daily stop either
   max_total_exposure_usd: 5
 
 sports:                            # Polymarket US sports (needs venue: polymarket_us)
