@@ -174,7 +174,7 @@ class CryptoFairModule(StrategyModule):
                     edge = fv.p_side(side) - ask - fee_per_share(ask, w.fee_schedule)
                     if best is None or edge > best["edge"]:
                         best = {"side": side, "edge": round(edge, 4), "ask": ask, "fair": round(fv.p_side(side), 4),
-                                "in_price_range": float(f.get("min_price", 0.05)) <= ask <= float(f.get("max_price", 0.95))}
+                                "in_price_range": float(f.get("min_price", 0.55)) <= ask <= float(f.get("max_price", 0.93))}
             out[dur] = {"opens_in_s": max(0.0, round(w.start + L / 3 - now)),
                         "closes_in_s": max(0.0, round(w.end - float(f.get("no_entry_last_s", 5)) - now)),
                         "need": need, "best": best}
@@ -207,8 +207,8 @@ class CryptoFairModule(StrategyModule):
                     continue
                 ask, ask_sz = bk["asks"][0]
                 bid, bid_sz = bk["bids"][0]
-                if not float(f.get("min_price", 0.05)) <= ask <= float(f.get("max_price", 0.95)):
-                    continue
+                if not float(f.get("min_price", 0.55)) <= ask <= float(f.get("max_price", 0.93)):
+                    continue                              # no long shots (and nothing above 93c)
                 p = fv.p_side(side)
                 edge = p - ask - fee_per_share(ask, w.fee_schedule)
                 stake = float(self.ec.get("stake_usd", 1))
@@ -237,7 +237,28 @@ class CryptoFairModule(StrategyModule):
         return out
 
     def entry_blockers(self, signal: Signal, active: list[dict], now: float) -> list[str]:
-        return list(self.problems)
+        out = list(self.problems)
+        clash = self.overlapping_position(signal.market_id, active)
+        if clash is not None:
+            out.append(f"already holding #{clash['id']} {clash['slug'].split('-')[3]} {clash['side']} in an "
+                       "overlapping window: one fair-value position per settlement time")
+        return out
+
+    @staticmethod
+    def overlapping_position(slug: str, active: list[dict]) -> Optional[dict]:
+        """An active position whose window overlaps (or settles with) the window of `slug`. 5m and 15m
+        markets that overlap are one combined bet: never double up, never bet against yourself."""
+        from ..exit_report import _window
+        _, s1, e1 = _window(slug)
+        if s1 is None:
+            return None
+        for p in active:
+            if p.get("status") == "void":
+                continue
+            _, s2, e2 = _window(p["slug"])
+            if s2 is not None and s1 < e2 and s2 < e1:
+                return p
+        return None
 
     def degraded(self) -> bool:
         return bool(self.problems)
@@ -289,6 +310,16 @@ class CryptoFairModule(StrategyModule):
                 if not certain:
                     return ExitDecision("SELL", f"late exit: {w.end - now:.0f}s left, bid {best_bid:.2f}, "
                                                 f"profit {val.pnl:+.2f} - books thin out near the close", "late_exit")
+        stop_below = float(x.get("sell_if_fair_below", 0.30))
+        if fair < stop_below:
+            return ExitDecision("SELL", f"true probability {fair:.0%} < {stop_below:.0%}: sell at the bid "
+                                        f"({best_bid:.2f}) instead of riding it to zero", "prob_stop")
+        entry = p.get("entry_price")
+        gain = float(x.get("profit_take_gain", 0.06))
+        if entry is not None and best_bid >= entry + gain - 1e-9 and fair - net < float(x.get("profit_take_max_edge", 0.03)):
+            return ExitDecision("SELL", f"profit take: bid {best_bid:.2f} >= entry {entry:.2f} + {gain:.2f} and "
+                                        f"edge left {fair - net:+.3f} < {float(x.get('profit_take_max_edge', 0.03)):.2f}",
+                                "profit_take")
         if net > fair:
             return ExitDecision("SELL", f"bid nets {net:.3f} > fair {fair:.3f}: someone is overpaying",
                                 "bid_above_fair")

@@ -518,3 +518,31 @@ def test_sell_rule_first_cancels_the_lock_then_sells(tmp_path):
         ticks = e.db.query("SELECT * FROM bot_ticks WHERE position_id=?", (p["id"],))
         assert ticks and ticks[-1]["decision"] == "SELL"
     asyncio.run(run())
+
+
+
+def test_profit_lock_price_is_entry_plus_10c_capped_at_96c(tmp_path):
+    e, t = _lock_trader(tmp_path, take_profit=5.0)
+    t.xc["profit_lock_offset"] = 0.10
+    m = SimpleNamespace(tick_size=0.01)
+    assert t._lock_price({"entry_price": 0.61}, m) == 0.71
+    assert t._lock_price({"entry_price": 0.90}, m) == 0.96
+    assert t._lock_price({"entry_price": None}, m) == 0.96
+
+    async def run():
+        e.book("UP", 0.50, 0.54)
+        e.signal("UP", 0.70)
+        now = time.time()
+        await t.tick(now)
+        e.book("UP", 0.50, 0.51)
+        await t.tick(now + 1)
+        await t.tick(now + 1.25)
+        p, = t.store.active_positions()
+        lock = t.broker.orders[p["lock_order"]]
+        assert lock.price == 0.61                                         # entry 0.51 + 0.10
+        e.book("UP", 0.61, 0.62)
+        await t.tick(now + 1.5)
+        p = t.store.position(p["id"])
+        assert p["status"] == "closed" and p["exit_trigger"] == "profit_lock"
+        assert p["pnl"] == pytest.approx(p["shares"] * 0.10)
+    asyncio.run(run())

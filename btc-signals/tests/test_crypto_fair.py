@@ -102,7 +102,7 @@ def test_exit_rules():
     m.problems = []
     m.fair_hist[w.slug] = [(now - 5, 0.70)]
     m.fair_now[w.slug] = FairValue(0.10, 100, 1, 0, 100, 1)
-    assert m.exit_decision(pos, _val(0.05), now).trigger == "sharp_flip"   # 0.70 -> 0.10 in 5 s
+    assert m.exit_decision(pos, _val(0.05), now).trigger == "prob_stop"    # fair 10% < 30%: sell, don't ride to 0
 
 
 def test_arbitrage_watcher_single_book():
@@ -179,3 +179,56 @@ def test_settlement_fetched_from_exchange_when_window_not_tracked():
     asyncio.run(run())
     assert m.settlement_per_share(pos) == 1.0 and settled == [slug]
     assert m.settlement_per_share({"slug": slug, "side": "UP"}) == 0.0
+
+
+def test_long_shots_and_93c_plus_are_never_bought():
+    L = 900
+    now = (int(time.time()) // L) * L + 400
+    for ask, fair in ((0.16, 0.40), (0.07, 0.30), (0.54, 0.90)):          # big model "edges", below 55c
+        m, _ = _module(now, fair, book(ask - 0.01, ask), book(1 - ask - 0.01, 1 - ask + 0.01))
+        sigs = m.signals(now)
+        assert all(s.side != "UP" for s in sigs), (ask, fair)
+    m, _ = _module(now, 0.999, book(0.93, 0.94), book(0.05, 0.06))
+    assert m.signals(now) == []                                          # 94c > 93c cap
+    m, _ = _module(now, 0.80, book(0.55, 0.56), book(0.43, 0.44))
+    assert [s.side for s in m.signals(now)] == ["UP"]                    # 56c with a real edge: allowed
+
+
+def test_no_doubled_or_opposite_bets_across_overlapping_windows():
+    from app.ingest.us_markets import us_slug
+    s15 = 1794272400                                                     # 01:00 UTC: 15m 01:00-01:15
+    w15, w5_in, w5_after = us_slug("15m", s15), us_slug("5m", s15 + 600), us_slug("5m", s15 + 900)
+    active = [{"id": 7, "slug": w15, "side": "UP", "status": "open"}]
+    assert CryptoFairModule.overlapping_position(w5_in, active)["id"] == 7      # settles at the same time
+    assert CryptoFairModule.overlapping_position(us_slug("5m", s15), active) is not None
+    assert CryptoFairModule.overlapping_position(w5_after, active) is None      # starts when it ends
+    assert CryptoFairModule.overlapping_position(us_slug("15m", s15 + 900), active) is None
+    m, _ = _module(time.time(), 0.8, book(0.6, 0.61), book(0.38, 0.39))
+    sig = SimpleNamespace(market_id=w5_in)
+    assert any("overlapping window" in b for b in m.entry_blockers(sig, active, time.time()))
+    assert m.entry_blockers(SimpleNamespace(market_id=w5_after), active, time.time()) == []
+
+
+def test_profit_take_and_probability_stop():
+    now = time.time()
+    m, w = _module(now, 0.70, book(0.66, 0.67), book(0.33, 0.34))
+    m.xc_exits = {"profit_take_gain": 0.06, "profit_take_max_edge": 0.03, "sell_if_fair_below": 0.30}
+    pos = {"slug": w.slug, "side": "UP", "p_model": 0.75, "token": w.token_up, "entry_price": 0.60}
+    # bid 0.66 = entry + 6c, nets 0.68 after... use net 0.68 vs fair 0.70: edge left 0.02 < 0.03 -> sell
+    d = m.exit_decision(pos, _val(0.68), now)
+    assert d.action == "SELL" and d.trigger == "profit_take"
+    d = m.exit_decision(pos, _val(0.64), now)                            # edge left 0.06: keep holding
+    assert d.action == "HOLD"
+    m, w = _module(now, 0.70, book(0.62, 0.63), book(0.37, 0.38))       # bid only entry + 2c
+    m.xc_exits = {"profit_take_gain": 0.06, "profit_take_max_edge": 0.03}
+    assert m.exit_decision(pos | {"slug": w.slug}, _val(0.69), now).action == "HOLD"
+    m, w = _module(now, 0.29, book(0.20, 0.22), book(0.78, 0.80))
+    m.xc_exits = {"sell_if_fair_below": 0.30}
+    d = m.exit_decision(pos | {"slug": w.slug}, _val(0.19), now)
+    assert d.action == "SELL" and d.trigger == "prob_stop"
+    m, w = _module(now, 0.31, book(0.20, 0.22), book(0.78, 0.80))
+    m.xc_exits = {"sell_if_fair_below": 0.30}
+    assert m.exit_decision(pos | {"slug": w.slug}, _val(0.19), now).action == "HOLD"
+    m, w = _module(now, 0.10, {"bids": [], "asks": [(0.12, 5)]}, book(0.88, 0.90))
+    m.xc_exits = {"sell_if_fair_below": 0.30}
+    assert m.exit_decision(pos | {"slug": w.slug}, Valuation(0, 0, 0, 0, 0, 0, 0, False), now).action == "HOLD"

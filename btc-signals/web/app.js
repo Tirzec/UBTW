@@ -299,7 +299,7 @@ function renderFair(b) {
     const when = (ms.warmup_left_s || 0) > 0 ? `after warm-up (${mmss(ms.warmup_left_s)})`
       : r.opens_in_s > 0 ? `in ${mmss(r.opens_in_s)}` : r.closes_in_s > 0 ? "open now" : "closed (next window)";
     const gap = bst ? bst.edge - r.need : null;
-    const status = !bst ? "no prices yet" : !bst.in_price_range ? `${bst.side} ask ${num(bst.ask)} outside 5–95¢`
+    const status = !bst ? "no prices yet" : !bst.in_price_range ? `${bst.side} ask ${num(bst.ask)} outside the 55–93¢ band (no long shots)`
       : gap >= 0 ? `<b class="pos">signal: ${bst.side} edge ${signed(bst.edge, 3)}</b>`
       : `${bst.side}: edge ${signed(bst.edge, 3)}, needs ${signed(r.need, 3)} (${signed(gap * 100, 1)} pts short)`;
     return `<tr><td>${esc(d)}</td><td>${when}</td><td>${status}</td></tr>`;

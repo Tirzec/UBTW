@@ -9,6 +9,7 @@
   python -m app.trader reconcile # compare the bot's records with the exchange now (read-only)
   python -m app.trader summary [--date YYYY-MM-DD] [--live] [--send]   # daily summary (paper by default)
   python -m app.trader exits [--live] [--days 3]   # positions that reached a 90c+ bid: timing of the sell
+  python -m app.trader entries [--live] [--days 7] # cheap (<30c) entries: why they passed; <30c vs >50c results
 """
 from __future__ import annotations
 
@@ -116,7 +117,9 @@ async def _account_report(cfg: dict, what: str, c) -> str:
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.trader")
     ap.add_argument("command", choices=["stop", "resume", "status", "stats", "fills", "reconcile", "summary",
-                                        "exits"])
+                                        "exits", "entries"])
+    ap.add_argument("--below", type=float, default=0.30, help="entries: 'cheap' threshold")
+    ap.add_argument("--above", type=float, default=0.50, help="entries: 'expensive' threshold")
     ap.add_argument("--days", type=float, default=3, help="exits: how far back")
     ap.add_argument("--date", help="summary: day (YYYY-MM-DD), default today")
     ap.add_argument("--live", action="store_true", help="summary: live trades instead of paper")
@@ -147,6 +150,12 @@ def main(argv=None) -> None:
         _set(c, "kill_requested", None)
         _set(c, "resume_requested", time.time())
         print("Resume requested: the running bot resumes within ~1 second.")
+    elif a.command == "entries":
+        from .db import DB
+        from .entry_report import analyse as entry_analyse, format_report as entry_format
+        db = DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db")))
+        print(entry_format(entry_analyse(db, mode="live" if a.live else "paper", days=a.days if a.days != 3 else 7,
+                                         below=a.below, above=a.above, cfg=cfg, fetch_outcomes=True)))
     elif a.command == "exits":
         from .db import DB
         from .exit_report import analyse, format_report

@@ -459,8 +459,22 @@ class AutoTrader:
             return o
         return await self.broker.poll(oid)
 
+    def _lock_price(self, p: dict, m) -> float | None:
+        """Resting profit-lock price: min(entry + profit_lock_offset, profit_lock_price), on the tick grid."""
+        cap = self.xc.get("profit_lock_price")
+        if not cap:
+            return None
+        cap = float(cap)
+        off = self.xc.get("profit_lock_offset")
+        entry = p.get("entry_price")
+        if off is None or entry is None:
+            return cap
+        tick = m.tick_size if m else 0.01
+        price = round(round((float(entry) + float(off)) / tick) * tick, 6)
+        return min(price, cap)
+
     async def _lock_sync(self, p: dict, m, now: float):
-        price = self.xc.get("profit_lock_price")
+        price = self._lock_price(p, m) if m is not None else None
         if not price or m is None:
             return p
         oid = p.get("lock_order")
