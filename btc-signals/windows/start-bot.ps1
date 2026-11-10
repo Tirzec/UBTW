@@ -22,6 +22,18 @@ if (Test-Path $pidFile) {
 Remove-Item $pidFile -ErrorAction SilentlyContinue        # stale file from a crash / power cut
 New-Item -ItemType Directory -Force (Join-Path $root "data") | Out-Null
 $appArgs = "-m app.main"
+# LIVE mode asks you to type a confirmation phrase, which a hidden window can't show: open a visible one
+if (-not $Visible) {
+    $inTrading = $false
+    foreach ($line in Get-Content (Join-Path $root "config.yaml")) {
+        if ($line -match '^trading:') { $inTrading = $true; continue }
+        if ($inTrading -and $line -match '^\S') { break }
+        if ($inTrading -and $line -match '^\s{2}mode:\s*live') {
+            Write-Host "LIVE mode: opening the bot in its own window so you can type the confirmation." -ForegroundColor Yellow
+            $Visible = $true; break
+        }
+    }
+}
 if ($Https) { $appArgs += " --https" }
 
 if ($Visible) {

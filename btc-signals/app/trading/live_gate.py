@@ -6,11 +6,35 @@ import os
 import sqlite3
 import sys
 
+from .risk import OFF
+
 import httpx
 
 from .store import SCHEMA, bot_stats
 
 CONFIRM_PHRASE = "I UNDERSTAND THIS TRADES REAL MONEY"
+
+
+def limits_text(tc: dict) -> str:
+    """The risk limits actually in force, in words ('off' shown as off, not as $False)."""
+    from .risk import OFF
+    rc = tc.get("risk", {}) or {}
+    ec = tc.get("entry", {}) or {}
+    pct = ec.get("stake_pct")
+    parts = [f"stake {float(pct):.0%} of buying power" if pct not in OFF else f"stake ${ec.get('stake_usd', 5)}"]
+    if rc.get("max_stake_usd") not in OFF:
+        parts.append(f"max stake ${rc.get('max_stake_usd', 5)}")
+    dl = rc.get("daily_loss_limit_usd", 25)
+    parts.append("no daily loss limit" if dl in OFF else f"daily loss limit ${dl}")
+    cl = rc.get("max_consecutive_losses", 5)
+    parts.append("no losing-streak stop" if cl in OFF else f"stop after {cl} losses in a row")
+    ep = rc.get("max_total_exposure_pct")
+    ex = rc.get("max_total_exposure_usd", 15)
+    if ep not in OFF:
+        parts.append(f"max exposure {float(ep):.0%} of buying power")
+    elif ex not in OFF:
+        parts.append(f"max exposure ${ex}")
+    return ", ".join(parts) + ". Only STOP ends trading when the automatic stops are off."
 
 
 def paper_record(db_path: str, venue: str = "polymarket_intl",
@@ -112,9 +136,7 @@ def check_live_gates(cfg: dict, db_path: str, *, interactive: bool = True,
         raise SystemExit("\nLIVE mode refused:\n  - " + "\n  - ".join(problems) +
                          "\n\nStart in paper mode instead (trading.mode: paper).")
     rc = tc.get("risk", {}) or {}
-    print(f"\nRisk limits: max stake ${rc.get('max_stake_usd', 5)}, daily loss limit "
-          f"${rc.get('daily_loss_limit_usd', 25)}, max {rc.get('max_consecutive_losses', 5)} losses in a "
-          f"row, max exposure ${rc.get('max_total_exposure_usd', 15)}")
+    print("\nRisk limits: " + limits_text(tc))
     print("Use a separate wallet funded only with money you can afford to lose.")
     if not interactive or not sys.stdin.isatty() and input_fn is input:
         raise SystemExit("LIVE mode needs a typed confirmation in an interactive terminal.")
@@ -161,16 +183,15 @@ def _check_us(cfg, tc, n, need, stats, problems, interactive, input_fn, account_
     rc = tc.get("risk", {}) or {}
     from .live_phase import PHASE1_MAX_DAILY_LOSS_USD, PHASE1_MAX_STAKE_USD, PHASE1_MAX_TRADES_PER_DAY
     print(f"\nAccount: {account}")
-    print(f"LIVE PHASE 1 hard limits (config can only lower them): stake <= ${PHASE1_MAX_STAKE_USD:g}, "
-          f"daily loss <= ${PHASE1_MAX_DAILY_LOSS_USD:g}, "
+    print("LIVE PHASE 1 hard limits (config can only lower or switch them off): "
+          + ("" if rc.get("max_stake_usd") in OFF else f"stake <= ${PHASE1_MAX_STAKE_USD:g}, ")
+          + ("" if rc.get("daily_loss_limit_usd") in OFF else f"daily loss <= ${PHASE1_MAX_DAILY_LOSS_USD:g}, ")
           + (f"<= {PHASE1_MAX_TRADES_PER_DAY} live trades/day. "
              if (tc.get("live_phase1", {}) or {}).get("max_trades_per_day", 10) not in (None, False, "off", "none")
              else "no daily trade cap (switched off). ")
           + 
           "Positions are reconciled with the exchange every 60 s; any mismatch halts trading.")
-    print(f"Risk limits: max stake ${rc.get('max_stake_usd', 5)}, daily loss limit "
-          f"${rc.get('daily_loss_limit_usd', 25)}, max {rc.get('max_consecutive_losses', 5)} losses in a "
-          f"row, max exposure ${rc.get('max_total_exposure_usd', 15)}")
+    print("Risk limits: " + limits_text(tc))
     print("Taker fee on Polymarket US: 0.095 x p x (1-p) per contract (0.0695 in your first 7 days).")
     print("Only trade money you can afford to lose. You must be 18+ (19 in AL/NE, 21 in MS) and in an "
           "eligible state.")
