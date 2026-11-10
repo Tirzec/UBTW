@@ -184,7 +184,8 @@ def taker_fee(shares: float, price: float, rate: float) -> float:
 def backtest_copy(entries: list[dict], *, price_after, market_info, delays=(10, 30), stake: float = 1.0,
                   max_worse: float = 0.03, slip: float = 0.01, fee_rate: float = 0.095,
                   min_time_to_end_s: int = 3600, copy_from: float = 0.0, copy_to: float = math.inf,
-                  wallet: str | None = None, now: Optional[float] = None) -> dict[int, dict]:
+                  wallet: str | None = None, now: Optional[float] = None,
+                  trace: Optional[dict] = None) -> dict[int, dict]:
     """Replay a trader's entries as a copier who acts `delay` seconds later.
 
     price_after(condition, token, t, side, wallet) -> price a copier could BUY (ask side) / SELL (bid side)
@@ -196,11 +197,20 @@ def backtest_copy(entries: list[dict], *, price_after, market_info, delays=(10, 
     the fraction is unknown, so keep holding rather than dump everything).
     Not sold: paid at resolution, or valued at the current price minus slippage and the exit fee.
     slip = extra cost per share on top of the observed price (international -> US price gap, impact).
+    trace: optional dict, filled with {delay: [event, ...]} (every copy, sell, skip and final mark) for audits.
     """
     now = now or time.time()
     out = {}
     for d in delays:
         r = CopyResult(d)
+        tr = trace.setdefault(d, []) if trace is not None else None
+
+        def note(kind, e=None, **kw):
+            if tr is not None:
+                base = {} if e is None else {"t": e["t"], "condition": e["condition"], "token": e["token"],
+                                             "slug": e.get("slug"), "title": e.get("title"),
+                                             "outcome": e.get("outcome"), "their_price": e["price"]}
+                tr.append({"kind": kind, **base, **kw})
         mine: dict[str, list] = {}                      # token -> [shares, cost basis, condition]
         theirs: dict[str, float] = {}                   # their shares seen so far
         realized: dict[str, float] = {}                 # token -> realized P&L of my current position
@@ -214,13 +224,16 @@ def backtest_copy(entries: list[dict], *, price_after, market_info, delays=(10, 
                 end = info.get("end_ts")
                 if end is not None and end - e["t"] < min_time_to_end_s:
                     r.skip("market resolves within 1 h")
+                    note("skip", e, why="ends<1h")
                     continue
                 px = price_after(e["condition"], tok, e["t"] + d, "BUY", wallet)
                 if px is None:
                     r.skip("no trade to price the copy")
+                    note("skip", e, why="unpriced")
                     continue
                 if px > e["price"] + max_worse + 1e-9:
                     r.skip("price more than 3c worse")
+                    note("skip", e, why=">3c", copy_price=px)
                     continue
                 buy = px + slip
                 if buy > 0.99:
@@ -235,6 +248,7 @@ def backtest_copy(entries: list[dict], *, price_after, market_info, delays=(10, 
                 r.cost += stake
                 r.fees += fee
                 r.gaps.append(buy - e["price"])
+                note("buy", e, copy_price=px, paid=buy, shares=sh, fee=fee)
             else:                                       # SELL: reduce by the same fraction
                 held = theirs.get(tok, 0.0)
                 theirs[tok] = max(0.0, held - e["size"])
@@ -257,6 +271,7 @@ def backtest_copy(entries: list[dict], *, price_after, market_info, delays=(10, 
                 m[0] -= sh
                 m[1] -= basis
                 r.add(m[2], pnl)
+                note("sell", e, frac=frac, sell_price=sell, pnl=pnl)
                 realized[tok] = realized.get(tok, 0.0) + pnl
                 if m[0] <= 1e-6:
                     r.closed += 1
@@ -268,6 +283,7 @@ def backtest_copy(entries: list[dict], *, price_after, market_info, delays=(10, 
             if info.get("payout") is not None:
                 pnl = sh * info["payout"] - basis
                 r.add(cond, pnl)
+                note("resolved", condition=cond, token=tok, payout=info["payout"], pnl=pnl)
                 r.closed += 1
                 r.wins += int(pnl + prior > 0)
             elif info.get("mark") is not None:
@@ -276,11 +292,13 @@ def backtest_copy(entries: list[dict], *, price_after, market_info, delays=(10, 
                 r.fees += fee
                 val = sh * exit_px - fee
                 r.add(cond, val - basis)
+                note("marked", condition=cond, token=tok, mark=info["mark"], pnl=val - basis)
                 r.open_pnl += val - basis
                 r.open_value += val
                 r.open_n += 1
             else:
                 r.add(cond, -basis)                     # unknown: assume worthless (conservative)
+                note("unpriced", condition=cond, token=tok, pnl=-basis)
                 r.open_pnl -= basis
                 r.skip("unpriced open position (counted as $0)")
         out[d] = r.as_dict()
