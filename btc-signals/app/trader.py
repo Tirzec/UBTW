@@ -213,7 +213,8 @@ def main(argv=None) -> None:
             print(f"{label}: {state} | today P&L {r.get('day_pnl', 0):+.2f} over {r.get('day_trades', 0)} trades | "
                   f"losses in a row {r.get('consecutive_losses', 0)}")
             if key.endswith("risk:copytrade"):
-                for k2, title in (("copy:paused", "paused traders"), ("copy:rescore", "weekly re-score")):
+                pk = "live:copy:paused" if key.startswith("live:") else "copy:paused"
+                for k2, title in ((pk, "paused traders"), ("copy:rescore", "weekly re-score")):
                     row = c.execute("SELECT value FROM bot_state WHERE key=?", (k2,)).fetchone()
                     for w, v in (json.loads(row["value"]) if row else {}).items():
                         print(f"  {title}: {v if isinstance(v, str) else (v.get('name'), v.get('alert') or 'ok')}")

@@ -54,6 +54,18 @@ def parse_positions(d: dict) -> dict:
     return out
 
 
+def parse_expired(d: dict) -> set:
+    """Slugs GET /v1/portfolio/positions reports as expired (settling / settled): not a mismatch."""
+    out = set()
+    pos = (d or {}).get("positions") or {}
+    items = pos.items() if isinstance(pos, dict) else [(p.get("marketSlug") or (p.get("marketMetadata") or {}).get("slug"), p)
+                                                      for p in pos]
+    for slug, p in items:
+        if slug and isinstance(p, dict) and p.get("expired"):
+            out.add(slug)
+    return out
+
+
 def bot_expected(db, venue: str = "polymarket_us") -> tuple[dict, set]:
     """(expected net per slug, slugs with an order in flight)."""
     rows = db.query("SELECT * FROM bot_positions WHERE mode='live' AND COALESCE(venue,'polymarket_intl')=? "
@@ -101,22 +113,28 @@ def compare(expected: dict, exchange: dict, inflight: set, bot_open: set | None,
     return out
 
 
-async def fetch_exchange(broker) -> tuple[dict, list]:
+async def fetch_exchange(broker, expired: set | None = None) -> tuple[dict, list]:
     d = await broker._req("GET", "/v1/portfolio/positions")
     o = await broker._req("GET", "/v1/orders/open")
     orders = o.get("orders") if isinstance(o, dict) else o
     if not isinstance(orders, list):
         orders = next((v for v in o.values() if isinstance(v, list)), []) if isinstance(o, dict) else []
+    if expired is not None:
+        expired |= parse_expired(d)
     return parse_positions(d), orders
 
 
 class Reconciler:
     def __init__(self, engine, broker, db, interval_s: float = 60, confirm_checks: int = 2,
-                 venue: str = "polymarket_us", bot_orders_fn=None):
+                 venue: str = "polymarket_us", bot_orders_fn=None, closed_fn=None):
         """bot_orders_fn() -> {order_id: market slug} for every order the bot holds open right now
-        (from the traders' brokers, so a kill/cancel is reflected immediately)."""
+        (from the traders' brokers, so a kill/cancel is reflected immediately).
+        closed_fn(slug) -> awaitable bool: the market no longer trades on Polymarket US. A position the
+        bot still lists but the exchange doesn't, in a market that has closed or settled, is SETTLING (the
+        trader books the payout shortly), not a mismatch. In an open market it still is one."""
         self.engine, self.broker, self.db = engine, broker, db
         self.bot_orders_fn = bot_orders_fn or (lambda: {})
+        self.closed_fn = closed_fn
         self.interval, self.confirm = interval_s, confirm_checks
         self.venue = venue
         self.strikes = 0
@@ -130,7 +148,17 @@ class Reconciler:
             slug, purpose = v if isinstance(v, tuple) else (v, "")
             if purpose != "lock":
                 inflight.add(slug)
-        exch, exch_open = await fetch_exchange(self.broker)
+        expired: set = set()
+        exch, exch_open = await fetch_exchange(self.broker, expired)
+        inflight |= expired                          # the exchange itself says: settling
+        if self.closed_fn is not None:
+            for slug, q in expected.items():         # bot holds, exchange shows none: closed market?
+                if slug not in inflight and abs(exch.get(slug, 0.0)) <= TOL and abs(q) > TOL:
+                    try:
+                        if await self.closed_fn(slug):
+                            inflight.add(slug)
+                    except Exception as e:  # noqa: BLE001 - unknown status: judged as a normal mismatch
+                        log.warning("reconcile: market status of %s unknown: %r", slug, e)
         mism = compare(expected, exch, inflight, set(bot_orders) if orders else None, exch_open)
         self.last = ReconResult(not mism, mism, exch, expected, sorted(inflight))
         return self.last

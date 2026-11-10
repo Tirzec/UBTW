@@ -185,9 +185,16 @@ class Engine:
         if self.trade_mode == "live" and self.venue == "polymarket_us":
             # load positions from the exchange FIRST; any mismatch halts before the first order
             from .trading.reconcile import Reconciler
+            from .trading.us_status import UsMarketStatus
+            self.us_status = UsMarketStatus(self.http)
             self.reconciler = Reconciler(self, broker, self.db,
                                          interval_s=float(self.cfg.get("trading", {}).get("reconcile_interval_s", 60)),
-                                         venue=self.venue, bot_orders_fn=self._bot_open_orders)
+                                         venue=self.venue, bot_orders_fn=self._bot_open_orders,
+                                         closed_fn=self.us_status.closed)
+            try:                                       # leftovers of switched-off modules: book what settled
+                await self.settle_leftovers(running=self._enabled_modules())
+            except Exception as e:  # noqa: BLE001
+                log.warning("leftover settlement before the startup check: %r", e)
             try:
                 r = await self.reconciler.startup()
                 log.warning("startup reconciliation: %s", "OK" if r.ok else "; ".join(r.mismatches))
@@ -208,7 +215,7 @@ class Engine:
             await self.trader.start()
         await self._start_sports()
         await self._start_copytrade()
-        if self.trade_mode == "live" and self.copytrade is not None:
+        if self.trade_mode == "live" and getattr(self, "us_status", None) is not None:
             self._tasks.append(asyncio.create_task(self._guard("leftovers", self._settle_leftovers_loop()),
                                                    name="leftovers"))
         if self.reconciler is not None:
@@ -348,13 +355,27 @@ class Engine:
         await t.start()
 
     def _running_modules(self) -> set:
-        return set(getattr(self, "traders", {}) or {})
+        """Modules whose LIVE trader manages its own LIVE rows (a paper trader never touches live rows)."""
+        return {k for k, t in (getattr(self, "traders", {}) or {}).items() if getattr(t, "mode", None) == "live"}
+
+    def _enabled_modules(self) -> set:
+        """Before the traders exist: modules that will run LIVE and recover their own rows at startup."""
+        c = self.cfg
+        out = set()
+        if ((c.get("modules", {}) or {}).get("crypto_updown", {}) or {}).get("enabled", True):
+            out.add("crypto_updown")
+        sc = c.get("sports", {}) or {}
+        if sc.get("enabled") and sc.get("live_enabled"):
+            out.add("sports")
+        cc = c.get("copytrade", {}) or {}
+        if cc.get("enabled") and str(cc.get("mode", "paper")) == "live":
+            out.add("copytrade")
+        return out
 
     async def _settle_leftovers_loop(self) -> None:
-        """LIVE positions of a module that is switched off (e.g. the old BTC strategy's last trades) have no
-        trader to settle them. Keep the books right: once Polymarket US settles the market, close the record
-        with the official payout. Without this the reconciler would see 'bot holds X, exchange shows none'
-        after the market expires and halt all trading. Nothing is ever bought or sold here."""
+        """LIVE positions of a module that is not running live (e.g. the old BTC strategy's last trades) have
+        no trader to settle them. Keep the books right: once Polymarket US settles the market, close the record
+        with the official payout. Nothing is ever bought or sold here."""
         while True:
             try:
                 await self.settle_leftovers()
@@ -362,33 +383,88 @@ class Engine:
                 log.warning("leftover settlement check: %r", e)
             await asyncio.sleep(120)
 
-    async def settle_leftovers(self, now: float | None = None) -> list[int]:
-        if self.trade_mode != "live" or self.copytrade is None:
+    async def _final_order(self, oid: str):
+        """Final state of an old LIVE order read from the exchange (None: unknown / still working)."""
+        broker = getattr(getattr(self, "reconciler", None), "broker", None)
+        if not oid or broker is None or not hasattr(broker, "adopt"):
+            return None
+        rows = self.db.query("SELECT * FROM bot_orders WHERE order_id=? AND mode='live' ORDER BY id DESC LIMIT 1",
+                             (oid,))
+        if not rows:
+            return None
+        o = broker.orders.get(oid)
+        if o is None:
+            o = await broker.adopt(rows[0])
+        else:
+            o.status = "live"                          # force a fresh read
+            o = await broker.poll(oid)
+        return o if o.done else None
+
+    async def _book_leftover_orders(self, p: dict) -> dict | None:
+        """Book the final fills of a leftover row's orders (entry / exit / resting lock). Returns the fresh row,
+        or None when it can't be settled yet."""
+        pid = p["id"]
+        upd = self.db.execute
+        if p["status"] == "opening":
+            o = await self._final_order(p.get("entry_order"))
+            if o is None and p.get("entry_order"):
+                return None
+            if o is None or o.filled <= 0:
+                upd("UPDATE bot_positions SET status='void', closed_ts=?, exit_reason=? WHERE id=?",
+                    (time.time(), "entry not filled (module switched off)", pid))
+                return None
+            upd("UPDATE bot_positions SET status='open', shares=?, cost=?, entry_fee=?, entry_price=? WHERE id=?",
+                (o.filled, o.notional, o.fee, round(o.avg_price, 6), pid))
+        elif p["status"] == "closing":
+            o = await self._final_order(p.get("exit_order"))
+            if o is None:
+                return None
+            sold = (p["exit_shares"] or 0) + o.filled
+            upd("UPDATE bot_positions SET status='open', exit_shares=?, exit_proceeds=?, exit_fee=?, exit_order=NULL "
+                "WHERE id=?", (sold, (p["exit_proceeds"] or 0) + o.notional, (p["exit_fee"] or 0) + o.fee, pid))
+        if p.get("lock_order"):
+            o = await self._final_order(p["lock_order"])
+            if o is None:
+                return None
+            q = self.db.query("SELECT * FROM bot_positions WHERE id=?", (pid,))[0]
+            d_sh = o.filled - (q.get("lock_filled") or 0)
+            if d_sh > 1e-9:
+                upd("UPDATE bot_positions SET exit_shares=?, exit_proceeds=?, exit_fee=?, lock_filled=?, "
+                    "lock_notional=?, lock_fee=? WHERE id=?",
+                    ((q["exit_shares"] or 0) + d_sh, (q["exit_proceeds"] or 0) + o.notional - (q.get("lock_notional") or 0),
+                     (q["exit_fee"] or 0) + o.fee - (q.get("lock_fee") or 0), o.filled, o.notional, o.fee, pid))
+            upd("UPDATE bot_positions SET lock_order=NULL WHERE id=?", (pid,))
+        return self.db.query("SELECT * FROM bot_positions WHERE id=?", (pid,))[0]
+
+    async def settle_leftovers(self, now: float | None = None, running: set | None = None) -> list[int]:
+        st = getattr(self, "us_status", None)
+        if self.trade_mode != "live" or st is None:
             return []
-        running = self._running_modules()
+        running = self._running_modules() if running is None else running
         rows = self.db.query("SELECT * FROM bot_positions WHERE mode='live' AND COALESCE(venue,'polymarket_intl')=? "
-                             "AND status IN ('open','resolving')", (self.venue,))
+                             "AND status IN ('opening','open','closing','resolving')", (self.venue,))
         done = []
         for p in rows:
             mod = p.get("module") or "crypto_updown"
             if mod in running or mod == "test_order":
                 continue
-            v = self.copytrade.settled.get(p["slug"])
+            v = await st.settlement(p["slug"])
             if v is None:
-                v = await self.copytrade.refresh_settlement(p["slug"])
-            if v is None:
+                continue                               # still trading / not settled yet
+            p = await self._book_leftover_orders(p)
+            if p is None or p["status"] in ("void", "closed"):
                 continue
             per = v if str(p["token"]).endswith(":long") else 1.0 - v
-            left = (p["shares"] or 0) - (p["exit_shares"] or 0)
+            left = max(0.0, (p["shares"] or 0) - (p["exit_shares"] or 0))
             payout = left * per
             basis = (p["cost"] or 0) + (p["entry_fee"] or 0)
             pnl = (p["exit_proceeds"] or 0) - (p["exit_fee"] or 0) + payout - basis
             self.db.execute("UPDATE bot_positions SET status='closed', payout=?, pnl=?, won=?, closed_ts=?, "
                             "exit_reason=COALESCE(exit_reason || '; then ', '') || ? WHERE id=?",
                             (payout, pnl, int(pnl > 0), now or time.time(),
-                             f"settled at {per:.2f}/share (module {mod} is switched off)", p["id"]))
+                             f"settled at {per:.2f}/share (module {mod} not running)", p["id"]))
             self.trade_store.event("resolve", f"{mod} position {p['id']} {p['slug']} settled at {per:.2f}/share "
-                                   f"after its module was switched off: P&L {pnl:+.2f}", position=p["id"])
+                                   f"while its module was not running: P&L {pnl:+.2f}", position=p["id"])
             self.alert("fill", f"Settled leftover {mod} position", f"{p['slug']}: P&L {pnl:+.2f}", "info")
             done.append(p["id"])
         return done

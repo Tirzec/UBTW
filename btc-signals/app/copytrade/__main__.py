@@ -340,16 +340,17 @@ def main(argv=None) -> None:
         # a trader auto-paused after their copies lost money (30+ closed copies): copy them again
         from ..config import load_config, resolve_path
         from ..db import DB
-        from .module import load_traders
+        from .module import copy_mode, load_traders, state_key
         from ..trading.store import TradeStore
         cfg = load_config()
-        store = TradeStore(DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db"))), "paper",
-                           cfg.get("venue", "polymarket_us"), "copytrade")
-        paused = dict(store.get_state("copy:paused") or {})
-        base = dict(store.get_state("copy:unpaused") or {})
+        mode = copy_mode(cfg)
+        venue = cfg.get("venue", "polymarket_us")
+        store = TradeStore(DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db"))), mode, venue, "copytrade")
+        paused = dict(store.get_state(state_key("copy:paused", mode)) or {})
+        base = dict(store.get_state(state_key("copy:unpaused", mode)) or {})
         names = {(t.get("name") or "").lower(): t["wallet"] for t in load_traders(cfg)}
-        rows = store.db.query("SELECT copy_leader, pnl FROM bot_positions WHERE mode='paper' AND module='copytrade' "
-                              "AND status='closed' AND copy_leader IS NOT NULL")
+        rows = store.db.query("SELECT copy_leader, pnl FROM bot_positions WHERE mode=? AND venue=? AND "
+                              "module='copytrade' AND status='closed' AND copy_leader IS NOT NULL", (mode, venue))
         for w in a.wallets:
             wal = names.get(w.lower(), w.lower())
             if paused.pop(wal, None):
@@ -359,8 +360,8 @@ def main(argv=None) -> None:
                       f"{int((cfg.get('copytrade', {}) or {}).get('pause_after_trades', 30))} copies are judged afresh)")
             else:
                 print(f"{w}: was not paused")
-        store.set_state("copy:paused", paused)
-        store.set_state("copy:unpaused", base)
+        store.set_state(state_key("copy:paused", mode), paused)
+        store.set_state(state_key("copy:unpaused", mode), base)
     else:
         cur = json.loads(APPROVED.read_text()) if APPROVED.exists() else {"traders": []}
         for t in cur["traders"]:

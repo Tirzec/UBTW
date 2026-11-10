@@ -343,6 +343,9 @@ class AutoTrader:
                         self.risk.state.maintenance_until = now + m.retry_after
                     except BrokerError as e:
                         self._api_error(f"position {p['id']}", e)
+                    except Exception as e:  # noqa: BLE001 - one bad row must never block the others' exits
+                        log.exception("position %s", p["id"])
+                        self._api_error(f"position {p['id']}", e)
             if self._entry_task is None or self._entry_task.done():
                 await self._entry_pass(now)        # timer-driven fallback (no book feed / other modules)
         self._save()
@@ -510,9 +513,21 @@ class AutoTrader:
                                       reasons=json.dumps([r.as_dict() for r in sig.reasons][:5]),
                                       **((sig.extra or {}).get("position_fields") or {}))
         t_send = time.time()
-        o = await self.broker.place_limit(token=token, side="BUY", price=plan.price, size=plan.shares,
-                                          post_only=plan.post_only,
-                                          ioc=False if limit is not None else None)
+        try:
+            o = await self.broker.place_limit(token=token, side="BUY", price=plan.price, size=plan.shares,
+                                              post_only=plan.post_only,
+                                              ioc=False if limit is not None else None)
+        except (BrokerError, Maintenance) as e:
+            # no order to manage: never leave an 'opening' row without one. If the outcome is unknown and the
+            # order did fill after all, reconciliation sees an unexpected position and halts trading.
+            unknown = "outcome unknown" in str(e)
+            self.store.update_position(pid, status="void", closed_ts=time.time(),
+                                       exit_reason=("entry order outcome unknown: " if unknown else
+                                                    "entry order failed: ") + str(e)[:200])
+            if unknown:
+                self._alert("Buy order outcome unknown", f"{sig.market_id}: {str(e)[:200]}. If it filled, the "
+                            "position check halts trading - check the Polymarket app.", "warn", "error")
+            raise
         self.store.order(o, pid, "entry")
         self.store.update_position(pid, entry_order=o.order_id, order_sent_ts=t_send)
         self._log_signal(sig, "entered", f"BUY @ {plan.price:.2f} (ask {(sig.extra or {}).get('ask')})", pid)
@@ -600,12 +615,16 @@ class AutoTrader:
     async def _manage(self, p: dict, now: float) -> None:
         m = self.module.market(p["slug"])
         if p["status"] == "opening":
+            if not p["entry_order"] or p["entry_order"] not in self.broker.orders:
+                await self._finish_entry(p)          # no order to follow (lost / never sent): void it
+                return
             o = await self.broker.poll(p["entry_order"])
             self.store.order(o, p["id"], "entry")
             if o.filled > 0 and not p.get("first_fill_ts"):
                 self.store.update_position(p["id"], first_fill_ts=now)
             timeout = float(self.ec.get("order_timeout_s", 8))
-            if o.filled >= o.size - 1e-9 or now - o.created >= timeout or \
+            abandoned = hasattr(self.module, "entry_abandoned") and self.module.entry_abandoned(p)
+            if o.filled >= o.size - 1e-9 or now - o.created >= timeout or abandoned or \
                     (m and m.entry_deadline is not None and now >= m.entry_deadline):
                 await self._finish_entry(p)
             return

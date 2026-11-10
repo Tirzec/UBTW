@@ -253,8 +253,19 @@ class UsLiveBroker:
                         self._seen.add(oid)
                         return await self.poll(oid)
                 if not o.post_only:
+                    # Another of our orders working on this market around t0 (e.g. a stacked copy's resting
+                    # buy) makes trade history ambiguous: never book its fills as this order's. Leave the
+                    # outcome unknown instead (the caller does not re-send; reconciliation watches).
+                    if any(x is not o and x.token.rsplit(":", 1)[0] == slug and (not x.done or x.created >= t0 - 30)
+                           for x in self.orders.values()):
+                        return None
                     trades = await self.recent_trades(slug, since=t0 - 1.0)
-                    new = [t for t in trades if t["id"] not in self._known_trades]
+                    plong = float(body["price"]["value"])
+                    buys_long = body["intent"] in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_SELL_SHORT")
+                    new = [t for t in trades if t["id"] not in self._known_trades and t.get("aggressor", True)
+                           and (t["price"] <= plong + 1e-9 if buys_long else t["price"] >= plong - 1e-9)]
+                    if sum(t["qty"] for t in new) > float(body["quantity"]) + 1e-9:
+                        return None                        # more than this order could have filled: ambiguous
                     if new:
                         self._known_trades.update(t["id"] for t in new)
                         qty = sum(t["qty"] for t in new)

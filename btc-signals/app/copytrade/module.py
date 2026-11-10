@@ -134,6 +134,14 @@ class CopyTradeModule(StrategyModule):
     def mode(self) -> str:
         return getattr(self.trader, "mode", None) or getattr(self.store, "mode", None) or "paper"
 
+    def sk(self, name: str) -> str:
+        """bot_state key for this mode: paper pauses / unpause baselines never carry into live (or back)."""
+        return state_key(name, self.mode)
+
+    def entry_abandoned(self, p: dict) -> bool:
+        """The trader sold out while our copy buy was still resting: cancel the rest of that buy now."""
+        return self.keep.get(str(p["id"]), 1.0) <= 0.02
+
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
         self.keep = {str(k): float(v) for k, v in (self.store.get_state("copy:keep") or {}).items()}
@@ -255,7 +263,7 @@ class CopyTradeModule(StrategyModule):
                              **{k: v for k, v in d.items() if k in ("trader", "token", "their_price", "us_ask")})
 
     def paused(self) -> dict:
-        return (self.store.get_state("copy:paused") or {}) if self.store else {}
+        return (self.store.get_state(self.sk("copy:paused")) or {}) if self.store else {}
 
     # ------------------------------------------------------------ leader events
     async def on_trade(self, t: LeaderTrade) -> None:
@@ -561,14 +569,14 @@ class CopyTradeModule(StrategyModule):
     def _check_auto_pause(self) -> None:
         n_after = int(self.cc.get("pause_after_trades", 30))
         paused = dict(self.paused())
-        base = self.store.get_state("copy:unpaused") or {}      # set by `unpause`: judge only later copies
+        base = self.store.get_state(self.sk("copy:unpaused")) or {}      # set by `unpause`: judge only later copies
         for w, s in self.trader_stats().items():
             b = base.get(w) or {}
             closed, pnl = s["closed"] - int(b.get("closed", 0)), s["pnl"] - float(b.get("pnl", 0.0))
             if w not in paused and closed >= n_after and pnl < 0:
                 name = next((t.get("name") for t in self.traders if t["wallet"] == w), w[:10])
                 paused[w] = f"copies lost ${-pnl:.2f} over {closed} closed trades"
-                self.store.set_state("copy:paused", paused)
+                self.store.set_state(self.sk("copy:paused"), paused)
                 self.store.event("risk", f"copying {name} PAUSED: {paused[w]}", "WARNING")
                 self.engine.alert("risk", f"Copy trading: {name} paused", paused[w] +
                                   ". Their open copies are held to resolution. "
@@ -632,6 +640,17 @@ class CopyTradeModule(StrategyModule):
                 "rules": {k: self.cc.get(k) for k in ("stake_usd", "max_worse", "max_per_market_usd",
                                                       "min_time_to_resolution_s", "pause_after_trades")},
                 "risk": (self.cc.get("risk") or {}), "ts": now}
+
+
+def state_key(name: str, mode: str) -> str:
+    return name if mode == "paper" else f"{mode}:{name}"
+
+
+def copy_mode(cfg: dict) -> str:
+    """The mode copy trading runs in per config (LIVE also needs the typed confirmation at startup)."""
+    cc = cfg.get("copytrade", {}) or {}
+    live = (cfg.get("trading", {}) or {}).get("mode") == "live" and str(cc.get("mode", "paper")) == "live"
+    return "live" if live else "paper"
 
 
 def rescore(traders: list[dict], days: int = 30) -> dict:
