@@ -94,6 +94,7 @@ class AutoTrader:
         self.last_balance: float | None = None
         self._limit_alerted: set = set()
         self._lock_rejected: dict[int, float] = {}      # position id -> time a post-only lock was rejected
+        self._cancel_sent: dict[str, float] = {}        # order id -> when we last asked the exchange to cancel
         self._tick_last: dict[int, tuple] = {}          # position id -> (ts, bid, decision) last trace row
         self._latency: list = []                        # recent exit latencies (ms)
         self._latency_alerted = 0.0
@@ -140,7 +141,7 @@ class AutoTrader:
         for p in self.store.active_positions():
             try:
                 if p["status"] == "opening":
-                    await self._finish_entry(p)
+                    await self._finish_entry(p)    # reads the entry's final fills (live) before deciding
                 elif p["status"] == "closing":
                     if p.get("exit_order"):
                         await self._final_read(p["exit_order"])
@@ -392,6 +393,17 @@ class AutoTrader:
             self.store.order(o, p["id"], "entry")
             self.store.event("cancel", f"entry order {o.order_id} canceled "
                              f"(filled {o.filled:.2f}/{o.size:.2f})", position=p["id"])
+        if self.mode == "live" and not getattr(o, "_final", False):
+            # a cancel / cancel-all marks the order canceled locally; fills that raced it are only visible
+            # on a fresh read. Never book or void an entry on unconfirmed numbers.
+            fo = await self._final_read(o.order_id, tries=2, wait_s=0.0)
+            if fo is None:
+                self.store.event("warning", f"entry {o.order_id}: final state not confirmed yet, retrying",
+                                 "WARNING", position=p["id"])
+                return                             # stays 'opening'; _manage retries next tick
+            fo._final = True
+            o = fo
+            self.store.order(o, p["id"], "entry")
         if o.filled <= 0:
             self.store.update_position(p["id"], status="void", exit_reason="entry not filled in time",
                                        closed_ts=time.time())
@@ -566,10 +578,12 @@ class AutoTrader:
             return p
         o = self.broker.orders.get(oid)
         if o is not None:
-            if not o.done:
+            sent = self._cancel_sent.get(oid, 0.0)
+            if not o.done and time.time() - sent > 5.0:
+                self._cancel_sent[oid] = time.time()
                 o = await self.broker.cancel(oid)
             if self.mode == "live":
-                o = await self._final_read(oid)
+                o = await self._final_read(oid, tries=2, wait_s=0.0)   # no sleeping inside the 250 ms tick
                 if o is None:
                     self.store.event("warning", f"lock {oid}: cancel not confirmed yet, sale postponed",
                                      "WARNING", position=p["id"])
@@ -612,6 +626,9 @@ class AutoTrader:
             shares = p["shares"] - (p["exit_shares"] or 0)
             if shares <= 1e-6:
                 return True
+            book = self.module.book(p["token"]) or {"bids": [], "asks": []}
+            if not book["bids"]:
+                return True                        # never sell into an empty book; next tick re-checks
         tick = m.tick_size if m else 0.01
         floor = round_price(max(tick, book["bids"][0][0] - int(self.xc.get("exit_slippage_ticks", 2)) * tick), tick)
         t_send = time.time()

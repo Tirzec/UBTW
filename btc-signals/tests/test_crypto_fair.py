@@ -97,9 +97,9 @@ def test_exit_rules():
     d = m.exit_decision(pos, _val(0.65), now)
     assert d.action == "HOLD" and d.trigger == "hold_to_resolution"         # fair 0.70 > bid
     assert m.exit_decision(pos, Valuation(0, 0, 0, 0, 0, 0, 0, False), now).action == "HOLD"   # empty book
-    m.problems = ["BRTI feed stale"]
+    m.problems = m.data_failures = ["BRTI feed stale"]
     assert m.exit_decision(pos, _val(0.50), now).trigger == "data_failure"
-    m.problems = []
+    m.problems = m.data_failures = []
     m.fair_hist[w.slug] = [(now - 5, 0.70)]
     m.fair_now[w.slug] = FairValue(0.10, 100, 1, 0, 100, 1)
     assert m.exit_decision(pos, _val(0.05), now).trigger == "prob_stop"    # fair 10% < 30%: sell, don't ride to 0
@@ -273,3 +273,21 @@ def test_one_entry_per_settlement_time_even_after_selling():
     blk = m.entry_blockers(SimpleNamespace(market_id=us_slug("5m", s15 + 600)), [], time.time())
     assert any("already traded #9" in b for b in blk)
     assert m.entry_blockers(SimpleNamespace(market_id=us_slug("5m", s15 + 900)), [], time.time()) == []
+
+
+
+def test_warm_up_after_restart_never_forces_an_exit():
+    """After a restart the model warms up for 30 min. That blocks ENTRIES only: an adopted position is held
+    (profit lock keeps working), and sold on data failure only if feeds are actually stale/disagreeing."""
+    now = time.time()
+    m, w = _module(now, 0.70, book(0.58, 0.60), book(0.40, 0.42))
+    pos = {"slug": w.slug, "side": "UP", "p_model": 0.75, "token": w.token_up, "entry_price": 0.60}
+    m.problems, m.data_failures = ["warming up (1500s left)"], []
+    assert m.exit_decision(pos, _val(0.58), now).action == "HOLD"           # fair known: normal rules
+    m.fair_now.clear()                                                      # basis not known yet: no fair
+    m.problems = ["warming up (1790s left)", "basis not known yet"]
+    d = m.exit_decision(pos, _val(0.58), now)
+    assert d.action == "HOLD" and d.trigger == "model_not_ready"
+    m.data_failures = ["spot feeds disagree by 40 bps"]
+    assert m.exit_decision(pos, _val(0.58), now).trigger == "data_failure"
+    assert m.signals(now) == []                                             # entries stay blocked

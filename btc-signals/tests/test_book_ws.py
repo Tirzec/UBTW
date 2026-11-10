@@ -79,6 +79,8 @@ def test_bad_websocket_frame_does_not_drop_the_connection():
     async def handler(ws, path=None):
         await ws.recv()
         await ws.send("not json at all")
+        await ws.send(json.dumps({"marketData": "x"}))                    # AttributeError shape
+        await ws.send(json.dumps({"marketData": {"marketSlug": "m1", "bids": ["0.5"], "offers": []}}))
         await ws.send(json.dumps({"marketData": {"marketSlug": "m1", "bids": [{"px": {"value": "0.5"}, "qty": "1"}],
                                                  "offers": [{"px": {"value": "0.6"}, "qty": "1"}],
                                                  "transactTime": "2026-11-10T00:00:00Z"}}))

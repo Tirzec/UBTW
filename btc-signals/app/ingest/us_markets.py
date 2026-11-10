@@ -330,7 +330,7 @@ class UsBookStream:
                 async for raw in self.ws:
                     try:
                         self.handle(raw)
-                    except (ValueError, KeyError, TypeError) as e:
+                    except Exception as e:  # noqa: BLE001 - one malformed frame must not drop the feed
                         self.last_error = f"bad frame: {type(e).__name__}: {e}"[:200]
             except asyncio.CancelledError:
                 raise

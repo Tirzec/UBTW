@@ -249,3 +249,65 @@ def test_kill_switch_books_fills_of_an_in_flight_exit(tmp_path):
         p2 = t.store.position(p["id"])
         assert p2["exit_shares"] == pytest.approx(5.0) and p2["status"] == "open"
     asyncio.run(run())
+
+
+
+def test_kill_switch_books_an_entry_that_filled_just_before_it(tmp_path):
+    e, b, t = _setup(tmp_path)
+
+    async def run():
+        now = time.time()
+        e.book("UP", 0.50, 0.54)
+        e.signal("UP", 0.70)
+        await t.tick(now)
+        p, = t.store.active_positions()
+        size = b.orders[p["entry_order"]].size
+        b.ex[p["entry_order"]].update(filled=size, notional=size * 0.51)   # filled on the exchange ...
+        await t.kill("test")                                                 # ... right before STOP
+        p2 = t.store.position(p["id"])
+        assert p2["status"] == "open" and p2["shares"] == pytest.approx(size)   # not voided
+    asyncio.run(run())
+
+
+def test_entry_cancel_not_confirmed_stays_opening_then_books(tmp_path):
+    e, b, t = _setup(tmp_path)
+
+    async def run():
+        now = time.time()
+        e.book("UP", 0.50, 0.54)
+        e.signal("UP", 0.70)
+        await t.tick(now)
+        p, = t.store.active_positions()
+        oid = p["entry_order"]
+        b.pending_cancel_reads[oid] = 5                                      # exchange slow to confirm
+        b.ex[oid].update(filled=2.0, notional=2.0 * 0.51)
+        await t.tick(now + 20)                                               # entry timeout -> cancel
+        assert t.store.position(p["id"])["status"] == "opening"              # not booked on stale numbers
+        b.pending_cancel_reads[oid] = 0
+        await t.tick(now + 20.25)
+        p2 = t.store.position(p["id"])
+        assert p2["status"] == "open" and p2["shares"] == pytest.approx(2.0)
+    asyncio.run(run())
+
+
+def test_cancel_confirmation_never_sleeps_inside_the_tick(tmp_path, monkeypatch):
+    e, b, t = _setup(tmp_path, {"take_profit_pct": 0.08})
+    slept = []
+    real_sleep = asyncio.sleep
+
+    async def spy(d=0, *a, **k):
+        slept.append(d)
+        await real_sleep(0)
+    monkeypatch.setattr("app.trading.trader.asyncio.sleep", spy)
+
+    async def run():
+        now = time.time()
+        p = await _open_position(e, t, now)
+        b.pending_cancel_reads[p["lock_order"]] = 50
+        e.book("UP", 0.57, 0.58)
+        await t.tick(now + 1.25)
+        await t.tick(now + 1.5)
+        assert all(d == 0 for d in slept)                                    # no 0.2 s waits in the loop
+        cancels = [k for k in t._cancel_sent]
+        assert cancels == [p["lock_order"]]                                  # cancel sent once, not per tick
+    asyncio.run(run())

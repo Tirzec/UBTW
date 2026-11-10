@@ -47,7 +47,8 @@ class CryptoFairModule(StrategyModule):
         self.fair_now: dict[str, FairValue] = {}             # slug -> latest fair value
         self.fair_hist: dict[str, deque] = {}                # slug -> (ts, p_up) last ~60 s
         self.sigma_hist: deque = deque(maxlen=720)           # (ts, sigma) every 30 s, 6 h
-        self.problems: list[str] = []
+        self.problems: list[str] = []              # anything that blocks ENTRIES
+        self.data_failures: list[str] = []         # the subset that also makes exits fail safe
         self.last_tick = 0
         self.arb: dict[str, dict] = {}
         self.ready: dict[str, dict] = {}
@@ -123,6 +124,7 @@ class CryptoFairModule(StrategyModule):
             bps = (hi - lo) / lo * 1e4
             if bps > float(f.get("max_spot_disagree_bps", 15)):
                 out.append(f"spot feeds disagree by {bps:.0f} bps")
+        self.data_failures = list(out)            # stale / disagreeing feeds: unsafe for exits too
         if now - self.started < float(f.get("warmup_s", 1800)):
             out.append(f"warming up ({self.started + float(f.get('warmup_s', 1800)) - now:.0f}s left)")
         if self.est.basis is None:
@@ -308,16 +310,22 @@ class CryptoFairModule(StrategyModule):
         fv = self.fair_now.get(p["slug"])
         if fv is None:
             return None, False
-        return fv.p_side(p["side"]), not self.problems
+        return fv.p_side(p["side"]), not self.data_failures
 
     # ------------------------------------------------------------ PART 3: exits
     def exit_decision(self, p: dict, val, now: float) -> ExitDecision:
         if val.shares_sellable <= 0:
             return ExitDecision("HOLD", "no bids: never sell into an empty book")
         fair, ok = self.fair(p)
-        if fair is None or not ok:
-            why = "; ".join(self.problems) or "no fair value"
-            return ExitDecision("SELL", f"emergency exit: data failure ({why})", "data_failure")
+        if self.data_failures:
+            return ExitDecision("SELL", f"emergency exit: data failure ({'; '.join(self.data_failures)})",
+                                "data_failure")
+        if fair is None:
+            # model not ready (warming up after a restart, basis unknown): hold; the resting profit lock
+            # keeps working and the price rules apply once fair value is available
+            why = "; ".join(self.problems) or "no fair value yet"
+            return ExitDecision("HOLD", f"model not ready ({why}): holding, profit lock still working",
+                                "model_not_ready")
         net = val.net_per_share
         x = self.xc_exits
         bk = self.book(p["token"]) or {}

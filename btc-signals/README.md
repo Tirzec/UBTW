@@ -155,6 +155,14 @@ Known limitations on Polymarket US:
   Partial fills keep the filled part; immediate orders never rest; 429 rate limits pause briefly.
 - `python -m app.trader reconcile` runs the comparison by hand (read-only).
 
+**Entry and exit rules (fair-value strategy, 2026-11-10).** Only sides priced 55c-93c are bought (the model
+overestimates cheap sides: see docs/FAIR_VALUE_RESULTS.md); one entry per settlement time (5m and 15m windows that
+overlap count as one); 30-minute warm-up after every start (the full volatility look-back; warm-up blocks
+entries only, never forces an exit). Exits: resting SELL at min(entry + 10c, 96c); bid >= entry + 6c with < 3
+points of edge left sells; true probability < 30% sells at the bid; 93c lock-in (only in profit); late-window exit.
+`python -m app.trader entries --live` (Windows: `.\windows\entries.bat`) explains every entry below 30c and
+compares results below 30c vs above 50c.
+
 **Fast exits (fair-value strategy).** A resting SELL for the whole position at 96c is placed the moment a
 position opens (fills with no reaction delay); bid >= 93c sells immediately unless the averaging window
 has started and fair > 99%; a profitable position with < 45 s (5m) / 90 s (15m) left sells at a bid >= 85c.
