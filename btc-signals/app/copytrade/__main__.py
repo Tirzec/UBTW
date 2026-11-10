@@ -113,9 +113,14 @@ def find_candidates(*, days: int = 90, recent_days: int = 30, pool: int = 150, n
     split = now - recent_days * 86400
     seen, people = set(), []
     boards = [("month", None, "PNL", pool)] + [("month", c, "PNL", max(20, pool // 3)) for c in CATEGORIES] + \
-             [("month", None, "VOL", pool // 2)]
+             [("month", None, "VOLUME", pool // 2)]
     for period, cat, sort_by, n in boards:
-        for row in api.leaderboard(period=period, sort_by=sort_by, category=cat, n=n):
+        try:
+            rows = api.leaderboard(period=period, sort_by=sort_by, category=cat, n=n)
+        except Exception as e:  # noqa: BLE001 - one board failing must not stop the search
+            log(f"leaderboard {cat or 'overall'}/{sort_by}: {e}")
+            rows = []
+        for row in rows:
             w = (row.get("user_id") or "").lower()
             if w and w not in seen:
                 seen.add(w)
