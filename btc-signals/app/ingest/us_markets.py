@@ -17,6 +17,7 @@ treats both venues the same.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -162,6 +163,9 @@ def us_book_to_store(store: BookStore, slug: str, data: dict, now: float, last_s
     """Write a /book response into the long (Up) and derived short (Down) books (pure)."""
     md = data.get("marketData") or data
     now = book_time(data, now)
+    cur = store.book(long_token(slug))
+    if getattr(cur, "updated", 0) and now < cur.updated - 1e-6:
+        return                            # older than what we already have (websocket vs poll race)
     bids = [(_amount(x.get("px")), float(x.get("qty") or 0)) for x in md.get("bids") or []]
     offers = [(_amount(x.get("px")), float(x.get("qty") or 0)) for x in md.get("offers") or []]
     bids = [(p, q) for p, q in bids if p is not None and q > 0]
@@ -197,6 +201,8 @@ class UsBookPoller:
         self.client = client or httpx.AsyncClient(timeout=10)
         self.store = BookStore()
         self._slugs: set[str] = set()
+        self.fast_slugs: set[str] = set()               # open positions: polled every fast_interval
+        self.fast_interval = float(uc.get("book_poll_fast_interval_s", 0.25))
         self._last_shares: dict[str, float] = {}
         self.connected = False
         self.last_msg = 0.0
@@ -205,6 +211,8 @@ class UsBookPoller:
 
     def set_assets(self, assets: set[str]) -> None:
         self._slugs = {a.rsplit(":", 1)[0] for a in assets if a}
+        if getattr(self, "ws", None) is not None:
+            self.ws.set_slugs(self._slugs)
 
     async def poll_slug(self, slug: str) -> None:
         r = await self.client.get(f"{self.gateway}/v1/markets/{slug}/book", params=nocache())
@@ -217,11 +225,26 @@ class UsBookPoller:
     async def refresh_rest(self, token: str) -> None:
         await self.poll_slug(token.rsplit(":", 1)[0])
 
+    def set_fast(self, slugs: set[str]) -> None:
+        self.fast_slugs = set(slugs)
+
+    async def run_fast(self) -> None:
+        """Markets with an open position: poll ~4x a second so exits react quickly."""
+        while True:
+            t0 = time.time()
+            if self.fast_slugs:
+                try:
+                    await asyncio.gather(*(self.poll_slug(s) for s in list(self.fast_slugs)))
+                except Exception as e:  # noqa: BLE001
+                    self.last_error = f"fast poll: {type(e).__name__}: {e}"[:200]
+            await asyncio.sleep(max(0.05, self.fast_interval - (time.time() - t0)))
+
     async def run(self) -> None:
+        asyncio.ensure_future(self.run_fast())
         while True:
             t0 = time.time()
             try:
-                await asyncio.gather(*(self.poll_slug(s) for s in list(self._slugs)))
+                await asyncio.gather(*(self.poll_slug(s) for s in list(self._slugs - self.fast_slugs)))
                 self.connected = bool(self._slugs)
                 self.last_error = ""
             except Exception as e:  # noqa: BLE001
@@ -230,3 +253,89 @@ class UsBookPoller:
                 self.last_error = f"{type(e).__name__}: {e}"[:200]
                 log.warning("Polymarket US book poll failed: %s", self.last_error)
             await asyncio.sleep(max(0.1, self.interval - (time.time() - t0)))
+
+
+class UsBookStream:
+    """Real-time order books over the authenticated Markets WebSocket (docs: /api-reference/websocket/
+    markets): wss://api.polymarket.us/v1/ws/markets, handshake signed like REST (timestamp + "GET" +
+    path), SUBSCRIPTION_TYPE_MARKET_DATA per market slug. Writes the same BookStore as the poller;
+    the newest snapshot (exchange transactTime) wins, so polling stays on as a backup."""
+
+    URL = "wss://api.polymarket.us/v1/ws/markets"
+    PATH = "/v1/ws/markets"
+
+    def __init__(self, store: BookStore, last_shares: dict, key_id: str, secret: str, url: str = URL):
+        self.store, self.last_shares = store, last_shares
+        self.key_id, self.secret, self.url = key_id, secret, url
+        self.wanted: set[str] = set()
+        self.subscribed: set[str] = set()
+        self.ws = None
+        self.connected = False
+        self.last_msg = 0.0
+        self.messages = 0
+        self.reconnects = 0
+        self.last_error = ""
+        self._req = 0
+
+    def set_slugs(self, slugs: set[str]) -> None:
+        self.wanted = set(slugs)
+        if self.ws is not None and self.connected:
+            asyncio.ensure_future(self._subscribe(self.wanted - self.subscribed))
+
+    async def _subscribe(self, slugs: set[str]) -> None:
+        slugs = sorted(slugs)
+        for i in range(0, len(slugs), 100):                     # max 100 markets per subscription
+            chunk = slugs[i:i + 100]
+            self._req += 1
+            await self.ws.send(json.dumps({"subscribe": {"requestId": f"md-{self._req}",
+                                                         "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
+                                                         "marketSlugs": chunk}}))
+            self.subscribed |= set(chunk)
+
+    def _headers(self) -> dict:
+        from ..trading.us_broker import Signer
+        h = Signer(self.key_id, self.secret).headers("GET", self.PATH)
+        h.pop("Content-Type", None)
+        return h
+
+    async def _connect(self):
+        import websockets
+        try:
+            return await websockets.connect(self.url, additional_headers=self._headers(), max_size=2 ** 22,
+                                            ping_interval=15)
+        except TypeError:                                         # websockets < 14
+            return await websockets.connect(self.url, extra_headers=self._headers(), max_size=2 ** 22,
+                                            ping_interval=15)
+
+    def handle(self, raw) -> None:
+        msg = json.loads(raw)
+        md = msg.get("marketData") if isinstance(msg, dict) else None
+        if md and md.get("marketSlug"):
+            us_book_to_store(self.store, md["marketSlug"], msg, time.time(), self.last_shares)
+            self.last_msg = time.time()
+            self.messages += 1
+
+    async def run(self) -> None:
+        backoff = 1.0
+        while True:
+            try:
+                self.ws = await self._connect()
+                self.connected, self.subscribed = True, set()
+                backoff = 1.0
+                await self._subscribe(self.wanted)
+                async for raw in self.ws:
+                    self.handle(raw)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.last_error = f"{type(e).__name__}: {e}"[:200]
+                log.warning("book websocket: %s (reconnecting in %.0fs)", self.last_error, backoff)
+            self.connected = False
+            self.reconnects += 1
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    def status(self) -> dict:
+        return {"connected": self.connected, "messages": self.messages, "reconnects": self.reconnects,
+                "last_msg_age": round(time.time() - self.last_msg, 1) if self.last_msg else None,
+                "error": self.last_error, "markets": len(self.subscribed)}

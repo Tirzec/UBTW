@@ -8,6 +8,7 @@
   python -m app.trader fills     # your latest real fills on Polymarket US (price, size, taker/maker)
   python -m app.trader reconcile # compare the bot's records with the exchange now (read-only)
   python -m app.trader summary [--date YYYY-MM-DD] [--live] [--send]   # daily summary (paper by default)
+  python -m app.trader exits [--live] [--days 3]   # positions that reached a 90c+ bid: timing of the sell
 """
 from __future__ import annotations
 
@@ -114,7 +115,9 @@ async def _account_report(cfg: dict, what: str, c) -> str:
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.trader")
-    ap.add_argument("command", choices=["stop", "resume", "status", "stats", "fills", "reconcile", "summary"])
+    ap.add_argument("command", choices=["stop", "resume", "status", "stats", "fills", "reconcile", "summary",
+                                        "exits"])
+    ap.add_argument("--days", type=float, default=3, help="exits: how far back")
     ap.add_argument("--date", help="summary: day (YYYY-MM-DD), default today")
     ap.add_argument("--live", action="store_true", help="summary: live trades instead of paper")
     ap.add_argument("--send", action="store_true", help="summary: also push it to your phone")
@@ -144,6 +147,11 @@ def main(argv=None) -> None:
         _set(c, "kill_requested", None)
         _set(c, "resume_requested", time.time())
         print("Resume requested: the running bot resumes within ~1 second.")
+    elif a.command == "exits":
+        from .db import DB
+        from .exit_report import analyse, format_report
+        db = DB(resolve_path(cfg, cfg.get("db_path", "data/signals.db")))
+        print(format_report(analyse(db, mode="live" if a.live else "paper", days=a.days)))
     elif a.command == "summary":
         from .db import DB
         from .trading.summary import build_summary, format_summary

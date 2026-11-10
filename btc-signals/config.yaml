@@ -176,7 +176,15 @@ trading:
     reentry_cooldown_s: 20
     max_entries_per_window: 1      # one fair-value position per window
   exits:
-    check_interval_s: 1            # exits: bid (after fees) vs fair every second; no % stop / take-profit
+    check_interval_s: 1            # exits: bid (after fees) vs fair; no % stop / take-profit
+    fast_check_interval_s: 0.25    # with an open position: check exits every 250 ms
+    profit_lock_price: 0.96        # resting SELL for the whole position at 96c, placed when it opens
+    lock_in_bid: 0.93              # bid >= 93c: sell now ...
+    lock_in_hold_above: 0.99       # ... unless the averaging window has started and fair > 99%
+    late_exit_s_5m: 45             # profitable and < 45 s left (5m) / < 90 s (15m) ...
+    late_exit_s_15m: 90
+    late_exit_min_bid: 0.85        # ... and bid >= 85c: sell
+    latency_alert_ms: 1000         # alert if the median price->sell-order time exceeds this
     exit_slippage_ticks: 0         # sell limit = best bid (never below it, never into an empty book)
     exit_order_timeout_s: 3
   risk:

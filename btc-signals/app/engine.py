@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import logging
 import time
 from collections import deque
@@ -64,9 +65,15 @@ class Engine:
         else:
             self.discovery = Discovery(cfg, self.http)
         self.discovery.on_settled = self._on_settled
+        self.book_ws = None
         if self.venue == "polymarket_us":
             from .ingest.us_markets import UsBookPoller
             self.clob = UsBookPoller(cfg, self.http)
+            kid, sec = os.environ.get("POLYMARKET_KEY_ID", "").strip(), os.environ.get("POLYMARKET_SECRET_KEY", "").strip()
+            if kid and sec and (cfg.get("polymarket_us", {}) or {}).get("book_websocket", True):
+                from .ingest.us_markets import UsBookStream
+                self.book_ws = UsBookStream(self.clob.store, self.clob._last_shares, kid, sec)
+                self.clob.ws = self.book_ws
         else:
             self.clob = ClobMarketStream(cfg, self.http)
         self.derivs = Derivatives(cfg, self.http)
@@ -121,6 +128,9 @@ class Engine:
     async def start(self) -> None:
         await self.feeds.seed_history()
         await self.feeds.start()
+        if self.book_ws is not None:
+            self._tasks.append(asyncio.create_task(self._guard("book-websocket", self.book_ws.run()),
+                                                   name="book-websocket"))
         for name, coro in (("discovery", self.discovery.run()), ("clob", self.clob.run()),
                            ("derivs", self.derivs.run()), ("news", self.news.run()),
                            ("calendar", self.calendar.run()), ("signals", self._signal_loop()),
@@ -219,7 +229,7 @@ class Engine:
                 continue
             for oid, o in t.broker.orders.items():
                 if not o.done:
-                    out[oid] = o.token.rsplit(":", 1)[0]
+                    out[oid] = (o.token.rsplit(":", 1)[0], getattr(o, "purpose", ""))
         return out
 
     async def _start_sports(self) -> None:

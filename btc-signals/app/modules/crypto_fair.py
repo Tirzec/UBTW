@@ -33,6 +33,7 @@ class CryptoFairModule(StrategyModule):
         self.engine = engine
         tc = cfg.get("trading", {}) or {}
         self.ec = tc.get("entry", {}) or {}
+        self.xc_exits = tc.get("exits", {}) or {}
         self.fc = cfg.get("fair_value", {}) or {}
         f = self.fc
         self.est = FairEstimator(sigma_step=int(f.get("sigma_step_s", 10)),
@@ -267,6 +268,24 @@ class CryptoFairModule(StrategyModule):
             why = "; ".join(self.problems) or "no fair value"
             return ExitDecision("SELL", f"emergency exit: data failure ({why})", "data_failure")
         net = val.net_per_share
+        x = self.xc_exits
+        bk = self.book(p["token"]) or {}
+        best_bid = bk["bids"][0][0] if bk.get("bids") else 0.0
+        fv = self.fair_now.get(p["slug"])
+        lock_in = float(x.get("lock_in_bid", 0.93))
+        if best_bid >= lock_in:
+            certain = fv is not None and fv.locked > 0 and fair > float(x.get("lock_in_hold_above", 0.99))
+            if not certain:
+                return ExitDecision("SELL", f"lock-in: bid {best_bid:.2f} >= {lock_in:.2f}, take the profit "
+                                            f"(fair {fair:.3f})", "lock_in")
+        w = self.engine.discovery.windows.get(p["slug"])
+        if w is not None:
+            late = float(x.get("late_exit_s_5m", 45) if w.duration == "5m" else x.get("late_exit_s_15m", 90))
+            if w.end - now <= late and val.pnl > 0 and best_bid >= float(x.get("late_exit_min_bid", 0.85)):
+                certain = fv is not None and fv.locked > 0 and fair > float(x.get("lock_in_hold_above", 0.99))
+                if not certain:
+                    return ExitDecision("SELL", f"late exit: {w.end - now:.0f}s left, bid {best_bid:.2f}, "
+                                                f"profit {val.pnl:+.2f} - books thin out near the close", "late_exit")
         if net > fair:
             return ExitDecision("SELL", f"bid nets {net:.3f} > fair {fair:.3f}: someone is overpaying",
                                 "bid_above_fair")

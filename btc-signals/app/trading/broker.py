@@ -32,6 +32,7 @@ class OrderState:
     fee: float = 0.0
     error: str = ""
     created: float = field(default_factory=lambda: time.time())   # looked up per call (testable clock)
+    purpose: str = ""         # entry | exit | lock (set by the trader)
 
     @property
     def avg_price(self) -> float:

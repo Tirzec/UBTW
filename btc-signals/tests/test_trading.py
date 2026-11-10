@@ -458,3 +458,63 @@ def test_raised_daily_limit_lifts_todays_stop_on_restart(tmp_path):
     assert t2.risk.state.day_stopped_until == 0.0
     assert not any("daily loss" in b for b in t2.risk.entry_blockers(now=now, stake=1, open_exposure=0,
                                                                      window_busy=False, degraded=False))
+
+
+
+def _lock_trader(tmp_path, take_profit):
+    import copy
+    cfg = copy.deepcopy(TC)
+    cfg["trading"]["exits"].update(profit_lock_price=0.96, take_profit_pct=take_profit, stop_loss_pct=5.0)
+    e = FakeEngine(tmp_path, int(time.time()) - 60)
+    store = TradeStore(e.db, "paper")
+    return e, AutoTrader(e, cfg, PaperBroker(e.clob.store.get, e.clob.store.trades_since, lambda t: SCHED), store)
+
+
+def test_resting_profit_lock_fills_without_reaction_delay(tmp_path):
+    e, t = _lock_trader(tmp_path, take_profit=5.0)
+
+    async def run():
+        e.book("UP", 0.50, 0.54)
+        e.signal("UP", 0.70)
+        now = time.time()
+        await t.tick(now)
+        e.book("UP", 0.50, 0.51)
+        await t.tick(now + 1)                                     # entry fills -> open
+        await t.tick(now + 1.25)                                  # resting lock placed
+        p, = t.store.active_positions()
+        lock = t.broker.orders[p["lock_order"]]
+        assert p["status"] == "open" and lock.side == "SELL" and lock.price == 0.96 and lock.post_only
+        assert lock.purpose == "lock" and lock.size == p["shares"]
+        e.book("UP", 0.96, 0.97)                                  # buyers reach 96c
+        await t.tick(now + 1.5)
+        p = t.store.position(p["id"])
+        assert p["status"] == "closed" and p["exit_trigger"] == "profit_lock"
+        assert p["pnl"] == pytest.approx(p["shares"] * (0.96 - 0.51))      # maker: no exit fee
+    asyncio.run(run())
+
+
+def test_sell_rule_first_cancels_the_lock_then_sells(tmp_path):
+    e, t = _lock_trader(tmp_path, take_profit=0.08)
+
+    async def run():
+        e.book("UP", 0.50, 0.54)
+        e.signal("UP", 0.70)
+        now = time.time()
+        await t.tick(now)
+        e.book("UP", 0.50, 0.51)
+        await t.tick(now + 1)
+        await t.tick(now + 1.25)
+        p, = t.store.active_positions()
+        lock_id = p["lock_order"]
+        e.book("UP", 0.57, 0.58)                                  # take-profit rule fires before 96c
+        await t.tick(now + 1.5)
+        p = t.store.position(p["id"])
+        assert p["status"] == "closed" and p["exit_trigger"] == "take_profit"
+        assert t.broker.orders[lock_id].status == "canceled"
+        sells = [o for o in t.broker.orders.values() if o.side == "SELL" and o.filled]
+        assert len(sells) == 1 and sells[0].purpose == "exit"     # sold once, never twice
+        ev = e.db.query("SELECT message FROM bot_events WHERE kind='exit_latency'")
+        assert ev and "price->order" in ev[0]["message"]
+        ticks = e.db.query("SELECT * FROM bot_ticks WHERE position_id=?", (p["id"],))
+        assert ticks and ticks[-1]["decision"] == "SELL"
+    asyncio.run(run())

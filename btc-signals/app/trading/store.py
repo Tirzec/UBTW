@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS bot_events (
   message TEXT, data TEXT
 );
 CREATE TABLE IF NOT EXISTS bot_state (key TEXT PRIMARY KEY, value TEXT, updated REAL);
+CREATE TABLE IF NOT EXISTS bot_ticks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, position_id INTEGER, bid REAL, bid_qty REAL, ask REAL,
+  fair REAL, decision TEXT, trigger TEXT, book_ts REAL, seconds_left REAL
+);
+CREATE INDEX IF NOT EXISTS bot_ticks_pos ON bot_ticks(position_id, ts);
 """
 
 SECRET_ENV = ("POLYMARKET_PRIVATE_KEY", "POLYMARKET_SECRET_KEY", "POLYMARKET_KEY_ID", "THERUNDOWN_API_KEY", "SHARPAPI_KEY",
@@ -96,6 +101,7 @@ class TradeStore:
         "league": "TEXT", "group_key": "TEXT", "bet_type": "TEXT", "confidence": "REAL",
         "starts_at": "REAL", "reasons": "TEXT", "closing_fair": "REAL", "clv": "REAL",
         "strategy": "TEXT", "time_left_s": "REAL", "side_won": "INTEGER", "fair_at_exit": "REAL",
+        "lock_order": "TEXT",
     }
 
     def __init__(self, db, mode: str, venue: str = "polymarket_intl", module: str = "crypto_updown"):
@@ -161,6 +167,12 @@ class TradeStore:
                              "AND COALESCE(module,'crypto_updown')=? "
                              "AND status='closed' AND closed_ts>=? ORDER BY closed_ts LIMIT ?",
                              (mode or self.mode, self.venue, self.module, since, limit))
+
+    def tick(self, position_id: int, **kw) -> None:
+        """Per-position price/decision trace (exit diagnostics)."""
+        cols = ["ts", "position_id"] + list(kw)
+        self.db.execute(f"INSERT INTO bot_ticks ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                        (time.time(), position_id, *kw.values()))
 
     def counted_paper_trades(self, since: float = 0.0) -> list[dict]:
         """Closed PAPER trades opened at/after `since` (the live-readiness count)."""

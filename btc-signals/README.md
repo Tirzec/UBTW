@@ -155,6 +155,15 @@ Known limitations on Polymarket US:
   Partial fills keep the filled part; immediate orders never rest; 429 rate limits pause briefly.
 - `python -m app.trader reconcile` runs the comparison by hand (read-only).
 
+**Fast exits (fair-value strategy).** A resting SELL for the whole position at 96c is placed the moment a
+position opens (fills with no reaction delay); bid >= 93c sells immediately unless the averaging window
+has started and fair > 99%; a profitable position with < 45 s (5m) / 90 s (15m) left sells at a bid >= 85c.
+Open positions are checked every 250 ms and their books polled ~4x a second; with API keys, books stream
+over the Markets WebSocket. Every position keeps a price/decision trace (`bot_ticks`), and each sell logs
+price -> order latency (alert if the median exceeds 1 s). `python -m app.trader exits --live`
+(Windows: `.\windows\exits.bat`) shows, for positions that reached a 90c+ bid, when it crossed, when the
+bot sold, and why.
+
 **Monitoring (free: ntfy or Telegram, set in `.env`).** In LIVE mode these always reach your phone:
 every fill (buy and sell, with fee), daily loss limit / phase trade cap reached, reconciliation
 mismatch, kill switch, errors (API errors, crashed background tasks). A **daily summary** is pushed

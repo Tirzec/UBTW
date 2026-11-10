@@ -126,7 +126,10 @@ class Reconciler:
     async def check(self, orders: bool = True) -> ReconResult:
         expected, inflight = bot_expected(self.db, self.venue)
         bot_orders = self.bot_orders_fn() if orders else {}
-        inflight |= set(bot_orders.values())
+        for v in bot_orders.values():                # resting profit locks don't make a market "in flight"
+            slug, purpose = v if isinstance(v, tuple) else (v, "")
+            if purpose != "lock":
+                inflight.add(slug)
         exch, exch_open = await fetch_exchange(self.broker)
         mism = compare(expected, exch, inflight, set(bot_orders) if orders else None, exch_open)
         self.last = ReconResult(not mism, mism, exch, expected, sorted(inflight))

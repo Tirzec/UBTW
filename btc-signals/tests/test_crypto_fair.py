@@ -92,7 +92,7 @@ def _val(net, shares=1.0):
 def test_exit_rules():
     now = time.time()
     m, w = _module(now, 0.70, book(0.58, 0.60), book(0.40, 0.42))
-    pos = {"slug": w.slug, "side": "UP", "p_model": 0.75}
+    pos = {"slug": w.slug, "side": "UP", "p_model": 0.75, "token": w.token_up}
     assert m.exit_decision(pos, _val(0.72), now).action == "SELL"          # bid 0.72 > fair 0.70
     d = m.exit_decision(pos, _val(0.65), now)
     assert d.action == "HOLD" and d.trigger == "hold_to_resolution"         # fair 0.70 > bid
@@ -121,3 +121,24 @@ def test_self_check_rule():
     assert r is not None and not r["ok"] and any("P&L" in p for p in r["problems"])
     assert any("calibration" in p for p in r["problems"])                  # 70% predicted, 50% won
     assert self_check(rows[:99]) is None and self_check(rows + rows[:10]) is None
+
+
+def test_lock_in_and_late_exit_rules():
+    L = 900
+    now = (int(time.time()) // L) * L + 500                     # 400 s left
+    m, w = _module(now, 0.97, book(0.94, 0.95), book(0.05, 0.06))
+    m.xc_exits = {"lock_in_bid": 0.93, "lock_in_hold_above": 0.99, "late_exit_s_15m": 90, "late_exit_min_bid": 0.85}
+    pos = {"slug": w.slug, "side": "UP", "p_model": 0.8, "token": w.token_up}
+    d = m.exit_decision(pos, Valuation(1, 0.94, 0, 0.94, 0.94, 0.3, 0.4, True), now)
+    assert d.action == "SELL" and d.trigger == "lock_in"          # bid 94c >= 93c, fair 0.97 says hold
+    m.fair_now[w.slug] = FairValue(0.995, 100, 1, 30, 30, 1)      # averaging started, 99.5% certain
+    d = m.exit_decision(pos, Valuation(1, 0.94, 0, 0.94, 0.94, 0.3, 0.4, True), now)
+    assert d.action == "HOLD"                                     # exception: near-certain -> hold
+    # late exit: 60 s left on a 15m window, profitable, bid 0.88 (fair 0.92 would say hold)
+    late = w.end - 60
+    m, w = _module(late, 0.92, book(0.88, 0.89), book(0.11, 0.12))
+    m.xc_exits = {"lock_in_bid": 0.93, "late_exit_s_15m": 90, "late_exit_min_bid": 0.85}
+    d = m.exit_decision(pos | {"slug": w.slug}, Valuation(1, 0.88, 0, 0.86, 0.86, 0.2, 0.3, True), late)
+    assert d.action == "SELL" and d.trigger == "late_exit"
+    d = m.exit_decision(pos | {"slug": w.slug}, Valuation(1, 0.88, 0, 0.86, 0.86, -0.1, -0.1, True), late)
+    assert d.action == "HOLD"                                     # not profitable: rule doesn't apply
