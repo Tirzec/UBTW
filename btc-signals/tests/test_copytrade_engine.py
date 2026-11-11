@@ -375,7 +375,36 @@ def test_hold_phase_follows_the_us_market_not_the_estimate():
     m.us_markets["s"] = {"status": "MARKET_STATUS_OPEN"}
     assert m.market("s").hold_phase_from > time.time()                         # overtime: still mirror sells
     m.us_markets["s"] = {"status": "MARKET_STATUS_CLOSED"}
-    assert m.market("s").hold_phase_from <= time.time()
+    before = time.time()                         # the trader takes its clock BEFORE asking the module
+    assert before >= m.market("s").hold_phase_from
+
+
+def test_copy_settles_with_the_official_payout(tmp_path):
+    """End to end: a copy in a market Polymarket US has resolved is closed at shares x settlement."""
+    import asyncio
+    from app.db import DB
+    from app.trading.broker import PaperBroker
+    from app.trading.store import TradeStore
+    from app.trading.trader import AutoTrader
+    db = DB(str(tmp_path / "s.db"))
+    st = TradeStore(db, "paper", "polymarket_us", "copytrade")
+    mod = _module(st)
+    t = AutoTrader(_Eng(), {}, PaperBroker(lambda k: None, lambda k, s: [], lambda k: {}), st, module=mod,
+                   exec_conf={"risk": {}})
+    mod.attach(st, t)
+    won = st.new_position(slug="w", duration="T", side="x", token="w:long", status="open", opened_ts=1.0,
+                          entry_price=0.4)
+    st.update_position(won, shares=2.5, cost=1.0, entry_fee=0.02)
+    lost = st.new_position(slug="l", duration="T", side="x", token="l:short", status="open", opened_ts=1.0,
+                           entry_price=0.5)
+    st.update_position(lost, shares=2.0, cost=1.0, entry_fee=0.02)
+    for slug in ("w", "l"):
+        mod.us_markets[slug] = {"status": "MARKET_STATUS_RESOLVED"}
+        mod.settled[slug] = 1.0                   # long side won both markets
+    asyncio.run(t.tick(time.time()))
+    a, b = st.position(won), st.position(lost)
+    assert a["status"] == "closed" and a["payout"] == pytest.approx(2.5) and a["pnl"] == pytest.approx(1.48)
+    assert b["status"] == "closed" and b["payout"] == 0 and b["pnl"] == pytest.approx(-1.02)
 
 
 def test_sells_made_while_stopped_are_caught_up():

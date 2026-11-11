@@ -455,7 +455,8 @@ class CopyTradeModule(StrategyModule):
         now = time.time()
         status = m.get("status")
         if slug in self.settled or (status and status != "MARKET_STATUS_OPEN"):
-            hold = now                                # closed/resolved on Polymarket US: wait for the settlement
+            hold = 0.0                                # closed/resolved on Polymarket US: hold phase ALREADY began
+                                                      # (not `now`: the trader compares with a slightly older clock)
         elif res:                                     # still open: keep mirroring their sells (overtime, late
             grace = 30 * 86400 if meta.get("league") == "politics" else 4 * 3600   # certification); fallback only
             hold = res + float(self.cc.get("hold_grace_s", grace))
